@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/optimism-java/utp-go"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"

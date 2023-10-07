@@ -1,7 +1,8 @@
 // Copyright (c) 2021 Storj Labs, Inc.
 // See LICENSE for copying information.
 
-//+build utpstatedebug
+//go:build utpstatedebug
+// +build utpstatedebug
 
 package utp
 
