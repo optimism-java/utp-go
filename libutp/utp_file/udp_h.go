@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
-	"storj.io/utp-go/libutp"
+	"github.com/optimism-java/utp-go/libutp"
 )
 
 // MaxOutgoingQueueSize is the maximum size of the outgoing queue.

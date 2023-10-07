@@ -17,8 +17,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"storj.io/utp-go/libutp"
-	"storj.io/utp-go/libutp/utp_file"
+	"github.com/optimism-java/utp-go/libutp"
+	"github.com/optimism-java/utp-go/libutp/utp_file"
 )
 
 var (

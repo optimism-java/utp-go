@@ -1101,7 +1101,7 @@ type Socket struct {
 	// When the window size is set to zero, start this timer. It will send a new packet every 30secs.
 	zeroWindowTime uint32
 
-	connSeed uint32
+	ConnSeed uint32
 	// Connection ID for packets I receive
 	connIDRecv uint32
 	// Connection ID for packets I send
@@ -2839,6 +2839,10 @@ func (s *Socket) SetLogger(logger *zap.Logger) {
 // be fully established until the Socket's OnStateChangeCallback is called with
 // state=StateConnect or state=StateWritable.
 func (s *Socket) Connect() {
+	s.ConnectWithSeed(randomUint32())
+}
+
+func (s *Socket) ConnectWithSeed(connSeed uint32) {
 	dumbAssert(s.state == csIdle)
 	dumbAssert(s.curWindowPackets == 0)
 	dumbAssert(s.outbuf.get(int(s.seqNum)) == nil)
@@ -2846,9 +2850,6 @@ func (s *Socket) Connect() {
 	s.state = csSynSent
 
 	currentMS := s.getCurrentMS()
-
-	// Create and send a connect message
-	connSeed := randomUint32()
 
 	// we identify newer versions by setting the
 	// first two bytes to 0x0001
@@ -2864,7 +2865,7 @@ func (s *Socket) Connect() {
 	s.rtoTimeout = uint(currentMS) + s.retransmitTimeout
 	s.lastReceiveWindow = s.getRcvWindow()
 
-	s.connSeed = connSeed
+	s.ConnSeed = connSeed
 	s.connIDRecv = connSeed
 	s.connIDSend = connSeed + 1
 	// if you need compatibility with 1.8.1, use this. it increases attackability though.
@@ -2903,7 +2904,7 @@ func (s *Socket) Connect() {
 	pa.setExtNext(0)
 	pa.setExtLen(8)
 
-	// s.logger.Debug("Sending connect", zap.Stringer("address", s.addr), zap.Uint32("conn_seed", connSeed))
+	// s.logger.Debug("Sending connect", zap.Stringer("address", s.addr), zap.Uint32("conn_seed", ConnSeed))
 
 	// Remember the message in the outgoing queue.
 	s.outbuf.ensureSize(int(s.seqNum), int(s.curWindowPackets))
@@ -2953,7 +2954,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 
 	flags := ph.getPacketType()
 	for _, conn := range mx.socketMap {
-		// conn.logger.Debug("Examining Socket", zap.Stringer("source", conn.addr), zap.Stringer("dest", toAddr), zap.Uint32("conn_seed", conn.connSeed), zap.Uint32("conn_id_send", conn.connIDSend), zap.Uint32("conn_id_recv", conn.connIDRecv), zap.Uint32("id", id))
+		// conn.logger.Debug("Examining Socket", zap.Stringer("source", conn.addr), zap.Stringer("dest", toAddr), zap.Uint32("conn_seed", conn.ConnSeed), zap.Uint32("conn_id_send", conn.connIDSend), zap.Uint32("conn_id_recv", conn.connIDRecv), zap.Uint32("id", id))
 		if conn.addr.Port != toAddr.Port {
 			continue
 		}
@@ -3040,7 +3041,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 			return true
 		}
 		// Need to track this value to be able to detect duplicate CONNECTs
-		conn.connSeed = id
+		conn.ConnSeed = id
 		// This is value that identifies this connection for them.
 		conn.connIDSend = id
 		// This is value that identifies this connection for us.

@@ -19,8 +19,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"storj.io/utp-go/buffers"
-	"storj.io/utp-go/libutp"
+	"github.com/optimism-java/utp-go/buffers"
+	"github.com/optimism-java/utp-go/libutp"
 )
 
 // Buffer for data before it gets to µTP (there is another "send buffer" in
@@ -32,11 +32,14 @@ const (
 	// Make the read buffer larger than advertised, so that surplus bytes can be
 	// handled under certain conditions.
 	receiveBufferMultiplier = 2
+	connCheckInterval       = time.Duration(500) * time.Millisecond
 )
 
 var noopLogger = zap.NewNop()
 
 var ErrReceiveBufferOverflow = fmt.Errorf("receive buffer overflow")
+
+var ErrListenerIsClosed = fmt.Errorf("listener was closed")
 
 // Addr represents a µTP address.
 type Addr net.UDPAddr
@@ -100,6 +103,23 @@ type Listener struct {
 	utpSocket
 
 	acceptChan <-chan *Conn
+
+	lock sync.Mutex
+
+	connSubscriber map[*ConnSubscriber]uint32
+
+	incomingConn map[uint32]*Conn
+
+	awaiting sync.Map
+
+	closed bool
+
+	cancel func()
+}
+
+type ConnSubscriber struct {
+	connId   uint32
+	receiver chan *Conn
 }
 
 // utpSocket is shared functionality between Conn and Listener.
@@ -162,11 +182,12 @@ func DialUTPOptions(network string, localAddr, remoteAddr *Addr, options ...Conn
 		logger:    noopLogger,
 		ctx:       context.Background(),
 		tlsConfig: nil,
+		connId:    0,
 	}
 	for _, opt := range options {
 		opt.apply(&s)
 	}
-	conn, err := dial(s.ctx, s.logger, network, localAddr, remoteAddr)
+	conn, err := dial(s.ctx, s.logger, network, localAddr, remoteAddr, s.connId)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +197,7 @@ func DialUTPOptions(network string, localAddr, remoteAddr *Addr, options ...Conn
 	return conn, nil
 }
 
-func dial(ctx context.Context, logger *zap.Logger, network string, localAddr, remoteAddr *Addr) (*Conn, error) {
+func dial(ctx context.Context, logger *zap.Logger, network string, localAddr, remoteAddr *Addr, connId uint32) (*Conn, error) {
 	managerLogger := logger.With(zap.Stringer("remote-addr", remoteAddr))
 	manager, err := newSocketManager(managerLogger, network, (*net.UDPAddr)(localAddr), (*net.UDPAddr)(remoteAddr))
 	if err != nil {
@@ -225,7 +246,11 @@ func dial(ctx context.Context, logger *zap.Logger, network string, localAddr, re
 		manager.baseConnLock.Lock()
 		defer manager.baseConnLock.Unlock()
 		connLogger.Debug("initiating libutp-level Connect()")
-		utpConn.baseConn.Connect()
+		if connId != 0 {
+			utpConn.baseConn.ConnectWithSeed(connId)
+		} else {
+			utpConn.baseConn.Connect()
+		}
 	}()
 
 	select {
@@ -309,9 +334,21 @@ func listen(logger *zap.Logger, network string, localAddr *Addr) (*Listener, err
 			localAddr: udpLocalAddr,
 			manager:   manager,
 		},
-		acceptChan: manager.acceptChan,
+		acceptChan:     manager.acceptChan,
+		connSubscriber: make(map[*ConnSubscriber]uint32),
+		incomingConn:   make(map[uint32]*Conn),
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	utpListener.cancel = cancel
+
 	manager.start()
+
+	listenerLabels := pprof.Labels(
+		"name", "socket-listener", "udp-socket", localAddr.String())
+	go func() {
+		pprof.Do(ctx, listenerLabels, utpListener.listenInComingConn)
+	}()
+
 	return utpListener, nil
 }
 
@@ -319,6 +356,7 @@ type utpDialState struct {
 	logger    *zap.Logger
 	ctx       context.Context
 	tlsConfig *tls.Config
+	connId    uint32
 }
 
 // ConnectOption is the interface which connection options should implement.
@@ -369,6 +407,18 @@ func (o *optionTLS) apply(s *utpDialState) {
 // will be established on the connection before Dial returns.
 func WithTLS(tlsConfig *tls.Config) ConnectOption {
 	return &optionTLS{tlsConfig: tlsConfig}
+}
+
+type optionConnId struct {
+	connId uint32
+}
+
+func (o *optionConnId) apply(s *utpDialState) {
+	s.connId = o.connId
+}
+
+func WithConnId(connId uint32) ConnectOption {
+	return &optionConnId{connId}
 }
 
 // Close closes a connection.
@@ -638,25 +688,62 @@ func (c *Conn) makeOpError(op string, err error) error {
 var _ net.Conn = &Conn{}
 
 // AcceptUTPContext accepts a new µTP connection on a listening socket.
-func (l *Listener) AcceptUTPContext(ctx context.Context) (*Conn, error) {
-	select {
-	case newConn, ok := <-l.acceptChan:
-		if ok {
-			return newConn, nil
-		}
-		err := l.encounteredError
-		if err == nil {
-			err = l.makeOpError("accept", net.ErrClosed)
-		}
-		return nil, err
-	case <-ctx.Done():
-		return nil, ctx.Err()
+func (l *Listener) AcceptUTPContext(ctx context.Context, connId uint32) (*Conn, error) {
+	if l.closed {
+		return nil, ErrListenerIsClosed
 	}
+	l.lock.Lock()
+	if conn := l.pollConn(connId); conn != nil {
+		l.lock.Unlock()
+		return conn, nil
+	}
+	if connId != 0 {
+		if _, exists := l.awaiting.LoadOrStore(connId, true); exists {
+			l.lock.Unlock()
+			return nil, fmt.Errorf("the connId is already exists: %d", connId)
+		}
+	}
+	subscriber := &ConnSubscriber{
+		connId:   connId,
+		receiver: make(chan *Conn),
+	}
+	l.connSubscriber[subscriber] = connId
+	l.lock.Unlock()
+
+	for {
+		select {
+		case conn := <-subscriber.receiver:
+			return conn, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func (l *Listener) pollConn(connId uint32) *Conn {
+	if len(l.incomingConn) == 0 {
+		return nil
+	}
+	if connId == 0 {
+		for key, _ := range l.incomingConn {
+			connId = key
+			break
+		}
+	}
+	if conn, ok := l.incomingConn[connId]; ok {
+		delete(l.incomingConn, connId)
+		return conn
+	}
+	return nil
 }
 
 // AcceptUTP accepts a new µTP connection on a listening socket.
 func (l *Listener) AcceptUTP() (*Conn, error) {
-	return l.AcceptUTPContext(context.Background())
+	return l.AcceptUTPContext(context.Background(), 0)
+}
+
+func (l *Listener) AcceptUTPWithConnId(connId uint32) (*Conn, error) {
+	return l.AcceptUTPContext(context.Background(), connId)
 }
 
 // Accept accepts a new µTP connection on a listening socket.
@@ -664,19 +751,96 @@ func (l *Listener) Accept() (net.Conn, error) {
 	return l.AcceptUTP()
 }
 
+func (l *Listener) AcceptWithConnId(connId uint32) (*Conn, error) {
+	return l.AcceptUTPWithConnId(connId)
+}
+
 // AcceptContext accepts a new µTP connection on a listening socket.
 func (l *Listener) AcceptContext(ctx context.Context) (net.Conn, error) {
-	return l.AcceptUTPContext(ctx)
+	return l.AcceptUTPContext(ctx, 0)
 }
 
 // Close closes a Listener.
 func (l *Listener) Close() error {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	l.closed = true
+	for subscriber := range l.connSubscriber {
+		close(subscriber.receiver)
+	}
+	l.cancel()
 	return l.utpSocket.Close()
 }
 
 // Addr returns the local address of a Listener.
 func (l *Listener) Addr() net.Addr {
 	return l.utpSocket.LocalAddr()
+}
+
+func (l *Listener) listenInComingConn(ctx context.Context) {
+	incomingTicker := time.NewTicker(connCheckInterval)
+	defer incomingTicker.Stop()
+	for {
+		select {
+		case newConn, ok := <-l.acceptChan:
+			if ok {
+				l.handleNewConn(newConn)
+				continue
+			}
+			err := l.encounteredError
+			if err == nil {
+				err = l.makeOpError("accept", net.ErrClosed)
+			}
+		case <-incomingTicker.C:
+			l.handleCheck()
+		case <-ctx.Done():
+			break
+		}
+	}
+}
+
+func (l *Listener) handleNewConn(conn *Conn) {
+	var connId uint32
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	if _, loaded := l.awaiting.LoadAndDelete(conn.baseConn.ConnSeed); loaded {
+		connId = conn.baseConn.ConnSeed
+	}
+
+	// find a receiver
+	var found bool
+	for subscriber, waitConnId := range l.connSubscriber {
+		if waitConnId == connId {
+			found = true
+			subscriber.receiver <- conn
+			delete(l.connSubscriber, subscriber)
+			break
+		}
+	}
+
+	// if nobody waits for conn, conn will be put into incomingConn
+	if !found {
+		l.incomingConn[conn.baseConn.ConnSeed] = conn
+	}
+}
+
+func (l *Listener) handleCheck() {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	if len(l.connSubscriber) == 0 || len(l.incomingConn) == 0 {
+		return
+	}
+	for subscriber, waitConnId := range l.connSubscriber {
+		if waitConnId != 0 {
+			continue
+		}
+		for key, conn := range l.incomingConn {
+			subscriber.receiver <- conn
+			delete(l.incomingConn, key)
+			break
+		}
+	}
+
 }
 
 var _ net.Listener = &Listener{}
