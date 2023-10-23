@@ -2839,7 +2839,7 @@ func (s *Socket) SetLogger(logger *zap.Logger) {
 // be fully established until the Socket's OnStateChangeCallback is called with
 // state=StateConnect or state=StateWritable.
 func (s *Socket) Connect() {
-	s.ConnectWithSeed(randomUint32())
+	s.ConnectWithSeed(RandomUint32())
 }
 
 func (s *Socket) ConnectWithSeed(connSeed uint32) {
@@ -2870,7 +2870,7 @@ func (s *Socket) ConnectWithSeed(connSeed uint32) {
 	s.connIDSend = connSeed + 1
 	// if you need compatibility with 1.8.1, use this. it increases attackability though.
 	// conn.seqNum = 1
-	s.seqNum = uint16(randomUint32())
+	s.seqNum = uint16(RandomUint32())
 
 	// Create the connect packet.
 	headerExtSize := s.getHeaderExtensionsSize()
@@ -3027,7 +3027,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		r.ackNum = seqNum
 		r.timestamp = mx.getCurrentMS()
 
-		sendRST(mx.logger, sendToCB, sendToUserdata, toAddr, id, seqNum, uint16(randomUint32()), version)
+		sendRST(mx.logger, sendToCB, sendToUserdata, toAddr, id, seqNum, uint16(RandomUint32()), version)
 		return true
 	}
 
@@ -3047,7 +3047,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		// This is value that identifies this connection for us.
 		conn.connIDRecv = id + 1
 		conn.ackNum = seqNum
-		conn.seqNum = uint16(randomUint32())
+		conn.seqNum = uint16(RandomUint32())
 		conn.fastResendSeqNum = conn.seqNum
 
 		conn.SetSockOpt(SO_UTPVERSION, int(version))

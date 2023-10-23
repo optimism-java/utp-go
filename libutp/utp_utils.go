@@ -54,7 +54,7 @@ func getUDPOverhead(addr *net.UDPAddr) uint16 {
 	return udpIPv4Overhead
 }
 
-func randomUint32() uint32 {
+func RandomUint32() uint32 {
 	var buf [4]byte
 	_, err := io.ReadFull(rand.Reader, buf[:])
 	if err != nil {
