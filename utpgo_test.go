@@ -10,6 +10,7 @@ import (
 	"crypto/sha512"
 	"errors"
 	"fmt"
+	"github.com/stretchr/testify/assert"
 	"io"
 	"net"
 	"runtime/pprof"
@@ -98,6 +99,22 @@ func TestUTPConnsInParallel(t *testing.T) {
 	}, "task", "connect-spawner")
 	err := group.Wait()
 	require.NoError(t, err)
+}
+
+func TestDefaultConnIdGenerator_GenCid(t *testing.T) {
+	gen := utp.NewConnIdGenerator()
+	s := struct {
+		id  uint32
+		url string
+	}{
+		id:  1,
+		url: "test_url/test_path",
+	}
+	cid_not_initiator := gen.GenCid(s, false)
+	assert.Equal(t, cid_not_initiator.RecvId(), cid_not_initiator.SendId()+1)
+
+	cid_initiator := gen.GenCid(s, true)
+	assert.Equal(t, cid_initiator.RecvId(), cid_initiator.SendId()-1)
 }
 
 func newTestServer(tb testing.TB, logger *zap.Logger) *utp.Listener {

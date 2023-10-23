@@ -117,9 +117,80 @@ type Listener struct {
 	cancel func()
 }
 
+// ConnSubscriber waiting for a connection to be accepted by the utp server
 type ConnSubscriber struct {
 	connId   uint32
 	receiver chan *Conn
+}
+
+// ConnId holds id to be used to accepted connection by the utp server
+type ConnId struct {
+	// receive connection id
+	recvId uint32
+	// send connection id
+	sendId uint32
+	// peer info
+	peer any
+}
+
+// RecvId get receive id
+func (c *ConnId) RecvId() uint32 {
+	return c.recvId
+}
+
+// SendId get send id
+func (c *ConnId) SendId() uint32 {
+	return c.sendId
+}
+
+// ConnIdGenerator generates connection id
+type ConnIdGenerator interface {
+	// GenCid generates a random connection id
+	GenCid(peer any, isInitiator bool) *ConnId
+}
+
+// DefaultConnIdGenerator default connection id generator, it will generate random connection id
+type DefaultConnIdGenerator struct {
+	lock sync.Mutex
+	cids map[any]bool
+}
+
+// NewConnIdGenerator creates a new instance of DefaultConnIdGenerator
+func NewConnIdGenerator() ConnIdGenerator {
+	return &DefaultConnIdGenerator{
+		cids: make(map[any]bool),
+	}
+}
+
+func (g *DefaultConnIdGenerator) GenCid(p any, isInitiator bool) *ConnId {
+	g.lock.Lock()
+	defer g.lock.Unlock()
+	var connId *ConnId
+	for {
+		recv := libutp.RandomUint32()
+		var send uint32
+		if isInitiator {
+			send = recv + 1
+		} else {
+			send = recv - 1
+		}
+		newConnId := ConnId{recvId: recv, sendId: send, peer: p}
+		if _, ok := g.cids[newConnId]; !ok {
+			g.cids[newConnId] = true
+			connId = &newConnId
+			break
+		}
+	}
+	return connId
+}
+
+// Remove removes connection id to be cached
+func (g *DefaultConnIdGenerator) Remove(c *ConnId) {
+	g.lock.Lock()
+	defer g.lock.Unlock()
+	if _, ok := g.cids[c]; ok {
+		delete(g.cids, c)
+	}
 }
 
 // utpSocket is shared functionality between Conn and Listener.
