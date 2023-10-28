@@ -52,7 +52,7 @@ func TestAcceptUtpWithConnId(t *testing.T) {
 		wg.Done()
 	}()
 
-	connNoSetConnId, err := utp.Dial("utp", "127.0.0.1:8080")
+	connNoSetConnId, err := utp.Dial("utp", l.Addr().String())
 	if err != nil {
 		panic(err)
 	}
@@ -61,7 +61,7 @@ func TestAcceptUtpWithConnId(t *testing.T) {
 		panic(err)
 	}
 
-	connSetConnId, err := utp.DialOptions("utp", "127.0.0.1:8080",
+	connSetConnId, err := utp.DialOptions("utp", l.Addr().String(),
 		utp.WithContext(context.Background()), utp.WithConnId(12))
 	if err != nil {
 		panic(err)
