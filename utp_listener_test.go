@@ -63,6 +63,7 @@ func TestAcceptUtpWithConnId(t *testing.T) {
 
 	connSetConnId, err := utp.DialOptions("utp", l.Addr().String(),
 		utp.WithContext(context.Background()), utp.WithConnId(12))
+
 	if err != nil {
 		panic(err)
 	}

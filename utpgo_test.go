@@ -15,6 +15,7 @@ import (
 	"net"
 	"runtime/pprof"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/optimism-java/utp-go"
@@ -36,6 +37,7 @@ func TestUTPConnsInSerial(t *testing.T) {
 	l := newTestServer(t, logger.Named("server"))
 
 	group := newLabeledErrgroup(context.Background())
+	var acceptCount atomic.Int32
 	group.Go(func(ctx context.Context) error {
 		for {
 			newConn, err := l.AcceptUTPContext(ctx, 0)
@@ -45,7 +47,9 @@ func TestUTPConnsInSerial(t *testing.T) {
 				}
 				return err
 			}
-			logger.Info("Accept succeeded", zap.Any("remote", newConn.RemoteAddr()))
+
+			logger.Info("Accept succeeded count", zap.Any("count", acceptCount.Add(1)))
+			//logger.Info("Accept succeeded", zap.Any("remote", newConn.RemoteAddr()))
 			group.Go(func(ctx context.Context) error {
 				return handleConn(ctx, newConn)
 			}, "task", "handle", "remote", newConn.RemoteAddr().String())
@@ -56,6 +60,7 @@ func TestUTPConnsInSerial(t *testing.T) {
 			if err := makeConn(ctx, logger.With(zap.Any("i", i)), l.Addr()); err != nil {
 				return err
 			}
+			logger.Info("connect succeeded count", zap.Any("count", i+1))
 		}
 		return l.Close()
 	}, "task", "connect")
@@ -220,7 +225,7 @@ func makeConn(ctx context.Context, logger *zap.Logger, addr net.Addr) (err error
 	if err != nil {
 		return err
 	}
-	if n < len(data)-1 {
+	if n != 1 {
 		return fmt.Errorf("short read: %d < %d", n, len(data)-1)
 	}
 	if int(data[0]) != 0xcc {
