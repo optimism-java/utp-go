@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -89,6 +90,97 @@ func divRoundUp(num, denom uint32) uint32 {
 	return (num + denom - 1) / denom
 }
 
+// ConnId holds id to be used to accepted connection by the utp server
+type ConnId struct {
+	// connection seed
+	connSeed uint32
+	// receive connection id
+	recvId uint32
+	// send connection id
+	sendId uint32
+	// peer info
+	peer any
+}
+
+func SendCid(connSeed uint32) *ConnId {
+	return &ConnId{
+		connSeed: connSeed,
+		recvId:   connSeed,
+		sendId:   connSeed + 1,
+	}
+}
+
+func ReceConnId(connSeed uint32) *ConnId {
+	return &ConnId{
+		// Need to track this value to be able to detect duplicate CONNECTs
+		connSeed: connSeed,
+		// This is value that identifies this connection for us.
+		recvId: connSeed + 1,
+		// This is value that identifies this connection for them.
+		sendId: connSeed,
+	}
+}
+
+// RecvId get receive id
+func (c *ConnId) RecvId() uint32 {
+	return c.recvId
+}
+
+// SendId get send id
+func (c *ConnId) SendId() uint32 {
+	return c.sendId
+}
+
+// ConnIdGenerator generates connection id
+type ConnIdGenerator interface {
+	// GenCid generates a random connection id
+	GenCid(peer any, isInitiator bool) *ConnId
+}
+
+// DefaultConnIdGenerator default connection id generator, it will generate random connection id
+type DefaultConnIdGenerator struct {
+	lock sync.Mutex
+	Cids map[any]bool
+}
+
+// NewConnIdGenerator creates a new instance of DefaultConnIdGenerator
+func NewConnIdGenerator() ConnIdGenerator {
+	return &DefaultConnIdGenerator{
+		Cids: make(map[any]bool),
+	}
+}
+
+func (g *DefaultConnIdGenerator) GenCid(p any, isInitiator bool) *ConnId {
+	g.lock.Lock()
+	defer g.lock.Unlock()
+	var connId *ConnId
+	for {
+		recv := RandomUint32()
+		var send uint32
+		if isInitiator {
+			send = recv + 1
+		} else {
+			send = recv - 1
+		}
+		newConnId := ConnId{recvId: recv, sendId: send, peer: p}
+		if _, ok := g.Cids[newConnId]; !ok {
+			g.Cids[newConnId] = true
+			connId = &newConnId
+			break
+		}
+	}
+	return connId
+}
+
+// Remove removes connection id to be cached
+func (g *DefaultConnIdGenerator) Remove(c *ConnId) {
+	g.lock.Lock()
+	defer g.lock.Unlock()
+	if _, ok := g.Cids[c]; ok {
+		delete(g.Cids, c)
+	}
+}
+
 // SocketMultiplexer coordinates µTP sockets that are sharing a single underlying
 // PacketConn.
 type SocketMultiplexer struct {
@@ -100,7 +192,7 @@ type SocketMultiplexer struct {
 	packetTimeCallback func() time.Duration
 
 	rstInfo   []rstInfo
-	socketMap map[string]*Socket
+	socketMap map[uint32]*Socket
 }
 
 // NewSocketMultiplexer creates a new instance of SocketMultiplexer.
@@ -112,7 +204,7 @@ func NewSocketMultiplexer(logger *zap.Logger, packetTimeCallback func() time.Dur
 	return &SocketMultiplexer{
 		logger:             logger,
 		packetTimeCallback: packetTimeCallback,
-		socketMap:          make(map[string]*Socket),
+		socketMap:          make(map[uint32]*Socket),
 	}
 }
 
@@ -1349,6 +1441,7 @@ func (s *Socket) sendAck(synack bool, currentMS uint32) {
 
 	s.sentAck(currentMS)
 	packetData := make([]byte, pa.encodedSize())
+	s.logger.Debug("Send ack", zap.Any("phType", pa.getPacketType()), zap.Any("phConnId", pa.getConnID()), zap.Any("packetSize", len(packetData)))
 	s.sendData(pa, packetData, AckOverhead, currentMS)
 }
 
@@ -1414,6 +1507,7 @@ func (s *Socket) sendPacket(pkt *outgoingPacket, currentMS uint32) {
 	} else if pkt.transmissions != 1 {
 		bwType = RetransmitOverhead
 	}
+	s.logger.Debug("Send packet", zap.Any("phType", pkt.header.getPacketType()), zap.Any("phConnId", pkt.header.getConnID()), zap.Any("packetSize", len(pkt.data)))
 	s.sendData(pkt.header, pkt.data, bwType, currentMS)
 }
 
@@ -2674,10 +2768,10 @@ func detectVersion(packetBytes []byte) int8 {
 func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
 	conn.logger.Debug("Killing socket")
 
-	foundConn, ok := mx.socketMap[conn.addrString]
+	foundConn, ok := mx.socketMap[conn.ConnSeed]
 	if ok {
 		dumbAssert(foundConn == conn)
-		delete(mx.socketMap, conn.addrString)
+		delete(mx.socketMap, conn.ConnSeed)
 	}
 
 	if ok {
@@ -2686,9 +2780,44 @@ func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
 	}
 }
 
+func (mx *SocketMultiplexer) IsConnIdExists(connId uint32) bool {
+	_, ok := mx.socketMap[connId]
+	return ok
+}
+
 // Create a µTP socket for communication with a peer at the given address.
-func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr) (*Socket, error) {
+func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr, cid *ConnId) (*Socket, error) {
 	conn := &Socket{logger: mx.logger, packetTimeCallback: mx.packetTimeCallback}
+
+	// default to version 1
+	conn.SetSockOpt(SO_UTPVERSION, 1)
+	// we identify newer versions by setting the
+	// first two bytes to 0x0001
+	if conn.version > 0 {
+		cid.connSeed &= 0xffff
+		cid.recvId &= 0xffff
+		cid.sendId &= 0xffff
+	}
+	conn.ConnSeed = cid.connSeed
+	conn.connIDRecv = cid.recvId
+	conn.connIDSend = cid.sendId
+	conn.addr = addr
+	conn.addrString = addr.String()
+	_, found := mx.socketMap[cid.connSeed]
+	if found {
+		// we can only have one Socket with a given same remote address
+		// associated with our underlying PacketConn (as we can only identify/
+		// distinguish connections by the 4-tuple of {local-ip, local-port,
+		// remote-ip, remote-port}).
+		err := &net.OpError{
+			Op:   "create",
+			Net:  "utp",
+			Addr: conn.addr,
+			Err:  errors.New("Socket already exists"),
+		}
+		conn = nil
+		return nil, err
+	}
 
 	currentMS := conn.getCurrentMS()
 
@@ -2700,8 +2829,7 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 	conn.seqNum = 1
 	conn.ackNum = 0
 	conn.maxWindowUser = 255 * packetSize
-	conn.addr = addr
-	conn.addrString = addr.String()
+
 	conn.sendToCB = sendToCB
 	conn.sendToUserdata = sendToUserdata
 	conn.ackTime = currentMS + 0x70000000
@@ -2714,9 +2842,6 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 	conn.curWindowPackets = 0
 	conn.fastResendSeqNum = conn.seqNum
 
-	// default to version 1
-	conn.SetSockOpt(SO_UTPVERSION, 1)
-
 	// we need to fit one packet in the window
 	// when we start the connection
 	conn.maxWindow = conn.GetPacketSize()
@@ -2728,26 +2853,9 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 	conn.outbuf.elements = make([]*outgoingPacket, 16)
 	conn.inbuf.elements = make([][]byte, 16)
 
-	var err error
+	mx.socketMap[cid.connSeed] = conn
 
-	_, found := mx.socketMap[conn.addrString]
-	if found {
-		// we can only have one Socket with a given same remote address
-		// associated with our underlying PacketConn (as we can only identify/
-		// distinguish connections by the 4-tuple of {local-ip, local-port,
-		// remote-ip, remote-port}).
-		err = &net.OpError{
-			Op:   "create",
-			Net:  "utp",
-			Addr: conn.addr,
-			Err:  syscall.EADDRINUSE,
-		}
-		conn = nil
-	} else {
-		mx.socketMap[conn.addrString] = conn
-	}
-
-	return conn, err
+	return conn, nil
 }
 
 // SetCallbacks assigns a table of callbacks to this Socket. If any
@@ -2839,10 +2947,6 @@ func (s *Socket) SetLogger(logger *zap.Logger) {
 // be fully established until the Socket's OnStateChangeCallback is called with
 // state=StateConnect or state=StateWritable.
 func (s *Socket) Connect() {
-	s.ConnectWithSeed(RandomUint32())
-}
-
-func (s *Socket) ConnectWithSeed(connSeed uint32) {
 	dumbAssert(s.state == csIdle)
 	dumbAssert(s.curWindowPackets == 0)
 	dumbAssert(s.outbuf.get(int(s.seqNum)) == nil)
@@ -2851,23 +2955,14 @@ func (s *Socket) ConnectWithSeed(connSeed uint32) {
 
 	currentMS := s.getCurrentMS()
 
-	// we identify newer versions by setting the
-	// first two bytes to 0x0001
-	if s.version > 0 {
-		connSeed &= 0xffff
-	}
-
 	// used in parse_log.py
-	s.logger.Info("UTP_Connect", zap.Uint32("conn_seed", connSeed), zap.Int("packet_size", packetSize), zap.Duration("target_delay", congestionControlTarget*time.Microsecond), zap.Int("delay_history", curDelaySize), zap.Int("delay_base_history", delayBaseHistory))
+	s.logger.Info("UTP_Connect", zap.Uint32("conn_seed", s.ConnSeed), zap.Int("packet_size", packetSize), zap.Duration("target_delay", congestionControlTarget*time.Microsecond), zap.Int("delay_history", curDelaySize), zap.Int("delay_base_history", delayBaseHistory))
 
 	// Setup initial timeout timer.
 	s.retransmitTimeout = 3000
 	s.rtoTimeout = uint(currentMS) + s.retransmitTimeout
 	s.lastReceiveWindow = s.getRcvWindow()
 
-	s.ConnSeed = connSeed
-	s.connIDRecv = connSeed
-	s.connIDSend = connSeed + 1
 	// if you need compatibility with 1.8.1, use this. it increases attackability though.
 	// conn.seqNum = 1
 	s.seqNum = uint16(RandomUint32())
@@ -3033,19 +3128,13 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 
 	if incomingCB != nil {
 		mx.logger.Debug("Incoming connection", zap.Int8("utp-version", version))
-
-		// Create a new UTP socket to handle this new connection
-		conn, err := mx.Create(sendToCB, sendToUserdata, toAddr)
+		cid := ReceConnId(id)
+		conn, err := mx.Create(sendToCB, sendToUserdata, toAddr, cid)
 		if err != nil {
 			mx.logger.Error("synchronous connections?", zap.Error(err))
 			return true
 		}
-		// Need to track this value to be able to detect duplicate CONNECTs
-		conn.ConnSeed = id
-		// This is value that identifies this connection for them.
-		conn.connIDSend = id
-		// This is value that identifies this connection for us.
-		conn.connIDRecv = id + 1
+
 		conn.ackNum = seqNum
 		conn.seqNum = uint16(RandomUint32())
 		conn.fastResendSeqNum = conn.seqNum

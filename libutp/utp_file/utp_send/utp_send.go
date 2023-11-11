@@ -91,7 +91,7 @@ func main() {
 		logger.Fatal("could not resolve destination", zap.String("dest", dest), zap.Error(err))
 	}
 
-	s, err := sm.Create(cbSendTo, sm, udpAddr)
+	s, err := sm.Create(cbSendTo, sm, udpAddr, libutp.SendCid(21))
 	if err != nil {
 		logger.Fatal("could not connect", zap.Stringer("dest-addr", udpAddr), zap.Error(err))
 	}

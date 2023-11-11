@@ -113,7 +113,7 @@ func testTransfer(t testing.TB, flags testFlag) {
 			break
 		}
 	}
-	require.NotNil(t, ts.incomingSocket)
+	require.NotNil(t, ts.incomingSocket, "incoming socket should not be null")
 	require.True(t, ts.senderSocket.connected)
 
 	buffer := make([]byte, 16*1024)
@@ -204,7 +204,7 @@ func newTestScenario(t testing.TB) *testScenario {
 		receiver: &scenario.sendManager,
 	}
 
-	sock, err := scenario.mx.Create(testSendToProc, &scenario.sendManager, &scenario.recvManager.myAddr)
+	sock, err := scenario.mx.Create(testSendToProc, &scenario.sendManager, &scenario.recvManager.myAddr, SendCid(RandomUint32()))
 	require.NoError(t, err)
 	scenario.senderSocket = newTestUTPSocket(t, sock)
 	return scenario

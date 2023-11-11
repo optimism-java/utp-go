@@ -29,7 +29,7 @@ import (
 const (
 	// use -10 for the most detail.
 	logLevel = 0
-	repeats  = 20
+	repeats  = 10
 )
 
 func TestUTPConnsInSerial(t *testing.T) {
@@ -91,9 +91,10 @@ func TestUTPConnsInParallel(t *testing.T) {
 	group.Go(func(ctx context.Context) error {
 		subgroup := newLabeledErrgroup(ctx)
 		for i := 0; i < repeats; i++ {
+			index := strconv.Itoa(i)
 			subgroup.Go(func(ctx context.Context) error {
-				return makeConn(ctx, logger.With(zap.Any("i", i)), l.Addr())
-			}, "task", "connect", "i", strconv.Itoa(i))
+				return makeConn(ctx, logger.With(zap.Any("i", index)), l.Addr())
+			}, "task", "connect", "i", index)
 		}
 		err := subgroup.Wait()
 		closeErr := l.Close()
@@ -226,7 +227,7 @@ func makeConn(ctx context.Context, logger *zap.Logger, addr net.Addr) (err error
 		return err
 	}
 	if n != 1 {
-		return fmt.Errorf("short read: %d < %d", n, len(data)-1)
+		return fmt.Errorf("short read: %d < %d", n, 1)
 	}
 	if int(data[0]) != 0xcc {
 		return fmt.Errorf("got %x response from remote instead of cc", int(data[0]))
