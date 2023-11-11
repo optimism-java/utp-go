@@ -192,7 +192,12 @@ type SocketMultiplexer struct {
 	packetTimeCallback func() time.Duration
 
 	rstInfo   []rstInfo
-	socketMap map[uint32]*Socket
+	socketMap map[SocketMapKey]*Socket
+}
+
+type SocketMapKey struct {
+	addr     string
+	connSeed uint32
 }
 
 // NewSocketMultiplexer creates a new instance of SocketMultiplexer.
@@ -204,7 +209,7 @@ func NewSocketMultiplexer(logger *zap.Logger, packetTimeCallback func() time.Dur
 	return &SocketMultiplexer{
 		logger:             logger,
 		packetTimeCallback: packetTimeCallback,
-		socketMap:          make(map[uint32]*Socket),
+		socketMap:          make(map[SocketMapKey]*Socket),
 	}
 }
 
@@ -2768,21 +2773,19 @@ func detectVersion(packetBytes []byte) int8 {
 func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
 	conn.logger.Debug("Killing socket")
 
-	foundConn, ok := mx.socketMap[conn.ConnSeed]
+	key := SocketMapKey{
+		addr: conn.addrString, connSeed: conn.ConnSeed,
+	}
+	foundConn, ok := mx.socketMap[key]
 	if ok {
 		dumbAssert(foundConn == conn)
-		delete(mx.socketMap, conn.ConnSeed)
+		delete(mx.socketMap, key)
 	}
 
 	if ok {
 		conn.callbackTable.OnState(conn.userdata, StateDestroying)
 		conn.SetCallbacks(nil, nil)
 	}
-}
-
-func (mx *SocketMultiplexer) IsConnIdExists(connId uint32) bool {
-	_, ok := mx.socketMap[connId]
-	return ok
 }
 
 // Create a µTP socket for communication with a peer at the given address.
@@ -2803,7 +2806,10 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 	conn.connIDSend = cid.sendId
 	conn.addr = addr
 	conn.addrString = addr.String()
-	_, found := mx.socketMap[cid.connSeed]
+	key := SocketMapKey{
+		addr: conn.addrString, connSeed: conn.ConnSeed,
+	}
+	_, found := mx.socketMap[key]
 	if found {
 		// we can only have one Socket with a given same remote address
 		// associated with our underlying PacketConn (as we can only identify/
@@ -2853,7 +2859,7 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 	conn.outbuf.elements = make([]*outgoingPacket, 16)
 	conn.inbuf.elements = make([][]byte, 16)
 
-	mx.socketMap[cid.connSeed] = conn
+	mx.socketMap[key] = conn
 
 	return conn, nil
 }

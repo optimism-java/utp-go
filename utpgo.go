@@ -748,9 +748,6 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, connId uint32) (*Conn, 
 	if l.closed {
 		return nil, ErrListenerIsClosed
 	}
-	if l.Manager.mx.IsConnIdExists(connId) {
-		return nil, fmt.Errorf("the ConnId is already exists: %d", connId)
-	}
 	l.lock.Lock()
 	if conn := l.pollConn(connId); conn != nil {
 		l.lock.Unlock()
