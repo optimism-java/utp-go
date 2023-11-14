@@ -189,7 +189,7 @@ type testScenario struct {
 func newTestScenario(t testing.TB) *testScenario {
 	logger := zaptest.NewLogger(t)
 	scenario := &testScenario{}
-	scenario.mx = NewSocketMultiplexer(logger, scenario.getTime)
+	scenario.mx = NewSocketMultiplexer(logger, scenario.getTime, 0)
 
 	scenario.sendManager = udpManager{
 		mx:       scenario.mx,

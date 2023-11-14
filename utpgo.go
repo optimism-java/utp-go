@@ -192,7 +192,7 @@ func DialUTPOptions(network string, localAddr, remoteAddr *Addr, options ...Conn
 		connId:    0,
 	}
 	for _, opt := range options {
-		opt.apply(&s)
+		opt(&s)
 	}
 	conn, err := dial(s.ctx, &s, network, localAddr, remoteAddr)
 	if err != nil {
@@ -296,7 +296,7 @@ func ListenOptions(network, addr string, options ...ConnectOption) (net.Listener
 		logger: noopLogger,
 	}
 	for _, opt := range options {
-		opt.apply(&s)
+		opt(&s)
 	}
 	switch network {
 	case "utp", "utp4", "utp6":
@@ -330,7 +330,7 @@ func ListenUTPOptions(network string, localAddr *Addr, options ...ConnectOption)
 		logger: noopLogger,
 	}
 	for _, opt := range options {
-		opt.apply(&s)
+		opt(&s)
 	}
 	return listen(&s, network, localAddr)
 }
@@ -359,6 +359,7 @@ func listen(s *utpDialState, network string, localAddr *Addr) (*Listener, error)
 	utpListener.cancel = cancel
 
 	manager.start()
+	manager.incrementReferences()
 
 	listenerLabels := pprof.Labels(
 		"name", "socket-listener", "udp-socket", localAddr.String())
@@ -375,106 +376,69 @@ type utpDialState struct {
 	tlsConfig        *tls.Config
 	connId           uint32
 	blockPacketCount uint32
+	maxPacketSize    int
 	sa               *PacketRouter
 	sm               *SocketManager
 }
 
 // ConnectOption is the interface which connection options should implement.
-type ConnectOption interface {
-	apply(s *utpDialState)
-}
-
-type optionLogger struct {
-	logger *zap.Logger
-}
-
-func (o *optionLogger) apply(s *utpDialState) {
-	s.logger = o.logger
-}
+type ConnectOption func(s *utpDialState)
 
 // WithLogger creates a connection option which specifies a logger to be
 // attached to the connection. The logger will receive debugging messages
 // about the socket.
 func WithLogger(logger *zap.Logger) ConnectOption {
-	return &optionLogger{logger: logger}
-}
-
-type optionContext struct {
-	ctx context.Context
-}
-
-func (o *optionContext) apply(s *utpDialState) {
-	s.ctx = o.ctx
+	return func(s *utpDialState) {
+		s.logger = logger
+	}
 }
 
 // WithContext creates a connection option which specifies a context to be
 // attached to the connection. If the context is closed, the dial operation
 // will be canceled.
 func WithContext(ctx context.Context) ConnectOption {
-	return &optionContext{ctx: ctx}
-}
-
-type optionTLS struct {
-	tlsConfig *tls.Config
-}
-
-func (o *optionTLS) apply(s *utpDialState) {
-	s.tlsConfig = o.tlsConfig
+	return func(s *utpDialState) {
+		s.ctx = ctx
+	}
 }
 
 // WithTLS creates a connection option which specifies a TLS configuration
 // structure to be attached to the connection. If specified, a TLS layer
 // will be established on the connection before Dial returns.
 func WithTLS(tlsConfig *tls.Config) ConnectOption {
-	return &optionTLS{tlsConfig: tlsConfig}
-}
-
-type optionConnId struct {
-	connId uint32
-}
-
-func (o *optionConnId) apply(s *utpDialState) {
-	s.connId = o.connId
+	return func(s *utpDialState) {
+		s.tlsConfig = tlsConfig
+	}
 }
 
 func WithConnId(connId uint32) ConnectOption {
-	return &optionConnId{connId: connId}
-}
-
-type optionPacketRouter struct {
-	sa *PacketRouter
-}
-
-func WithPacketRouter(socketAdapter *PacketRouter) ConnectOption {
-	return &optionPacketRouter{socketAdapter}
-}
-
-func (o *optionPacketRouter) apply(s *utpDialState) {
-	s.sa = o.sa
-}
-
-type optionBlockPacketCount struct {
-	count uint32
+	return func(s *utpDialState) {
+		s.connId = connId
+	}
 }
 
 func WithBlockPacketCount(count uint32) ConnectOption {
-	return &optionBlockPacketCount{count}
+	return func(s *utpDialState) {
+		s.blockPacketCount = count
+	}
 }
 
-func (o *optionBlockPacketCount) apply(s *utpDialState) {
-	s.blockPacketCount = o.count
-}
-
-type optionSocketManager struct {
-	sm *SocketManager
+func WithPacketRouter(sa *PacketRouter) ConnectOption {
+	return func(s *utpDialState) {
+		s.sa = sa
+	}
 }
 
 func WithSocketManager(sm *SocketManager) ConnectOption {
-	return &optionSocketManager{sm}
+	return func(s *utpDialState) {
+		s.sm = sm
+	}
 }
 
-func (o *optionSocketManager) apply(s *utpDialState) {
-	s.sm = o.sm
+func WithMaxPacketSize(m int) ConnectOption {
+	return func(s *utpDialState) {
+		s.maxPacketSize = m
+	}
 }
 
 // Close closes a connection.
@@ -997,7 +961,7 @@ type SocketManager struct {
 }
 
 const (
-	defaultUTPConnBacklogSize = 5
+	defaultUTPConnBacklogSize = 100
 )
 
 func NewSocketManager(network string, localAddr *net.UDPAddr, options ...ConnectOption) (*SocketManager, error) {
@@ -1005,7 +969,7 @@ func NewSocketManager(network string, localAddr *net.UDPAddr, options ...Connect
 		logger: noopLogger,
 	}
 	for _, opt := range options {
-		opt.apply(&s)
+		opt(&s)
 	}
 	return newSocketManager(&s, network, localAddr, nil)
 }
@@ -1038,13 +1002,14 @@ func newSocketManager(s *utpDialState, network string, localAddr, remoteAddr *ne
 			if err != nil {
 				sm.registerSocketError(err)
 			}
+			sm.logger.Debug("send buf and write to socket len", zap.Int("len", n), zap.Int("buf-length", len(buf)))
 			return n, nil
 		}
 	} else {
 		msgWriter = s.sa.msgWriter
 	}
 	// thread-safe here; don't need baseConnLock
-	mx := libutp.NewSocketMultiplexer(managerLogger.Named("mx").With(zap.Stringer("local-addr", localAddr)), nil)
+	mx := libutp.NewSocketMultiplexer(managerLogger.Named("mx").With(zap.Stringer("local-addr", localAddr)), nil, s.maxPacketSize)
 	sigQueueLen := uint32(50)
 	if s.blockPacketCount != 0 {
 		sigQueueLen = s.blockPacketCount

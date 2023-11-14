@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/optimism-java/utp-go"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
 	"io"
@@ -20,20 +21,43 @@ func TestAcceptUtpWithConnId(t *testing.T) {
 	l := newTestServer(t, logger.Named("server"))
 	var wg sync.WaitGroup
 	wg.Add(1)
-	//go func() {
-	//	conn, err := l.AcceptUTPWithConnId(12)
-	//	if err != nil {
-	//		panic(err)
-	//	}
-	//	logger.Info("accept a conn with connectionId:", zap.Any("connId", 12))
-	//	buf := make([]byte, 100)
-	//	n, err := conn.Read(buf)
-	//	if err != nil {
-	//		panic(err)
-	//	}
-	//	assert.Equal(t, "hello! connId is 12", string(buf[:n]))
-	//	wg.Done()
-	//}()
+	go func() {
+		conn, err := l.AcceptUTPWithConnId(12)
+		if err != nil {
+			panic(err)
+		}
+		logger.Info("accept a conn with connectionId:", zap.Any("connId", 12))
+		buf := make([]byte, 100)
+		n, err := conn.Read(buf)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(t, "hello! connId is 12", string(buf[:n]))
+		wg.Done()
+	}()
+
+	connSetConnId, err := utp.DialOptions("utp", l.Addr().String(),
+		utp.WithContext(context.Background()), utp.WithConnId(12))
+
+	if err != nil {
+		panic(err)
+	}
+	_, err = connSetConnId.Write([]byte("hello! connId is 12"))
+	if err != nil {
+		panic(err)
+	}
+	wg.Wait()
+	err = l.Close()
+	if err != nil {
+		panic(err)
+	}
+}
+
+func TestAcceptWithoutConnId(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.DebugLevel))
+	l := newTestServer(t, logger.Named("server"))
+	var wg sync.WaitGroup
+	wg.Add(1)
 
 	go func() {
 		conn, err := l.AcceptUTP()
@@ -68,21 +92,6 @@ func TestAcceptUtpWithConnId(t *testing.T) {
 	assert.NoError(t, err, "cli conn read buf has error")
 	assert.Equal(t, "hello! connId is not defined", string(readBuf[:n]))
 
-	//connSetConnId, err := utp.DialOptions("utp", l.Addr().String(),
-	//	utp.WithContext(context.Background()), utp.WithConnId(12))
-	//
-	//if err != nil {
-	//	panic(err)
-	//}
-	//_, err = connSetConnId.Write([]byte("hello! connId is 12"))
-	//if err != nil {
-	//	panic(err)
-	//}
-	wg.Wait()
-	err = l.Close()
-	if err != nil {
-		panic(err)
-	}
 }
 
 func TestAcceptTimeout(t *testing.T) {

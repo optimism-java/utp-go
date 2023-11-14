@@ -65,7 +65,7 @@ type UDPSocketManager struct {
 // NewUDPSocketManager creates a new UDPSocketManager.
 func NewUDPSocketManager(logger *zap.Logger) *UDPSocketManager {
 	return &UDPSocketManager{
-		SocketMultiplexer: libutp.NewSocketMultiplexer(logger, nil),
+		SocketMultiplexer: libutp.NewSocketMultiplexer(logger, nil, 0),
 		Logger:            logger,
 	}
 }

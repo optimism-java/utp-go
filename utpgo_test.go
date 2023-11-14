@@ -29,11 +29,11 @@ import (
 const (
 	// use -10 for the most detail.
 	logLevel = 0
-	repeats  = 10
+	repeats  = 2
 )
 
 func TestUTPConnsInSerial(t *testing.T) {
-	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.Level(logLevel)))
+	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.Level(-10)))
 	l := newTestServer(t, logger.Named("server"))
 
 	group := newLabeledErrgroup(context.Background())
@@ -57,10 +57,11 @@ func TestUTPConnsInSerial(t *testing.T) {
 	}, "task", "accept")
 	group.Go(func(ctx context.Context) error {
 		for i := 0; i < repeats; i++ {
-			if err := makeConn(ctx, logger.With(zap.Any("i", i)), l.Addr()); err != nil {
+			index := i
+			if err := makeConn(ctx, logger.With(zap.Any("i", index)), l.Addr()); err != nil {
 				return err
 			}
-			logger.Info("connect succeeded count", zap.Any("count", i+1))
+			logger.Info("connect succeeded count", zap.Any("count", index+1))
 		}
 		return l.Close()
 	}, "task", "connect")
@@ -69,24 +70,31 @@ func TestUTPConnsInSerial(t *testing.T) {
 }
 
 func TestUTPConnsInParallel(t *testing.T) {
-	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.Level(logLevel)))
+	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.Level(-10)))
 	l := newTestServer(t, logger.Named("server"))
 
 	group := newLabeledErrgroup(context.Background())
 	group.Go(func(ctx context.Context) error {
-		for {
-			newConn, err := l.AcceptContext(ctx)
-			if err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					return nil
+		subgroup := newLabeledErrgroup(ctx)
+		for i := 0; i < repeats; i++ {
+			subgroup.Go(func(ctx context.Context) error {
+				newConn, err := l.AcceptContext(ctx)
+				if err != nil {
+					if errors.Is(err, net.ErrClosed) {
+						return nil
+					}
+					return err
 				}
-				return err
-			}
-			logger.Info("Accept succeeded", zap.Any("remote", newConn.RemoteAddr()))
-			group.Go(func(ctx context.Context) error {
+				logger.Info("Accept succeeded", zap.Any("remote", newConn.RemoteAddr()))
 				return handleConn(ctx, newConn.(*utp.Conn))
-			}, "task", "handle", "remote", newConn.RemoteAddr().String())
+			}, "task", "handle")
 		}
+		err := subgroup.Wait()
+		closeErr := l.Close()
+		if err == nil {
+			err = closeErr
+		}
+		return err
 	}, "task", "accept")
 	group.Go(func(ctx context.Context) error {
 		subgroup := newLabeledErrgroup(ctx)
@@ -173,6 +181,9 @@ func handleConn(ctx context.Context, conn *utp.Conn) (err error) {
 		_, _ = conn.WriteContext(ctx, []byte{0x2})
 		return err
 	}
+	fmt.Println("--------------------------start")
+	fmt.Println(fmt.Sprintf("conn(%p) received \ndata: %x;\n hash: %x", conn, buf, sig))
+	fmt.Println("--------------------------end")
 	hashOfData := sha512.Sum512(buf)
 	if bytes.Compare(hashOfData[:], sig) != 0 {
 		_, _ = conn.WriteContext(ctx, []byte{0x3})
@@ -189,8 +200,10 @@ func handleConn(ctx context.Context, conn *utp.Conn) (err error) {
 }
 
 func makeConn(ctx context.Context, logger *zap.Logger, addr net.Addr) (err error) {
-	netConn, err := utp.DialUTPOptions("utp", nil, addr.(*utp.Addr), utp.WithLogger(logger))
+	netConn, err := utp.DialUTPOptions("utp", nil, addr.(*utp.Addr), utp.WithContext(ctx), utp.WithLogger(logger.Named("cli")))
+	logger.Info("dial to server")
 	if err != nil {
+		logger.Info("dialing error", zap.Any("err", err))
 		return err
 	}
 
@@ -214,7 +227,9 @@ func makeConn(ctx context.Context, logger *zap.Logger, addr net.Addr) (err error
 	}
 	hashOfData := sha512.Sum512(data[:dataBlobSize])
 	copy(data[dataBlobSize:], hashOfData[:])
-	logger.Info("writing bytes", zap.Any("len", len(data)))
+	fmt.Println("--------------------------start")
+	fmt.Println(fmt.Sprintf("will send \ndata: %x;\nhash: %x", data[:dataBlobSize], hashOfData[:]))
+	fmt.Println("--------------------------end")
 	n, err := conn.WriteContext(ctx, data)
 	if err != nil {
 		return err

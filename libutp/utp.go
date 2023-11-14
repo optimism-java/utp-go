@@ -155,7 +155,7 @@ func (g *DefaultConnIdGenerator) GenCid(p any, isInitiator bool) *ConnId {
 	defer g.lock.Unlock()
 	var connId *ConnId
 	for {
-		recv := RandomUint32()
+		recv := RandomUint16()
 		var send uint32
 		if isInitiator {
 			send = recv + 1
@@ -191,8 +191,11 @@ type SocketMultiplexer struct {
 	// various packet fields and timers. It must be thread-safe and reentrant.
 	packetTimeCallback func() time.Duration
 
-	rstInfo   []rstInfo
-	socketMap map[SocketMapKey]*Socket
+	rstInfo                  []rstInfo
+	mapLock                  sync.Mutex
+	socketMap                map[SocketMapKey]*Socket
+	dynamicPacketSizeEnabled bool
+	maxPacketSize            int
 }
 
 type SocketMapKey struct {
@@ -201,15 +204,18 @@ type SocketMapKey struct {
 }
 
 // NewSocketMultiplexer creates a new instance of SocketMultiplexer.
-func NewSocketMultiplexer(logger *zap.Logger, packetTimeCallback func() time.Duration) *SocketMultiplexer {
+func NewSocketMultiplexer(logger *zap.Logger, packetTimeCallback func() time.Duration, maxPacketSize int) *SocketMultiplexer {
 	if packetTimeCallback == nil {
 		createTime := time.Now()
 		packetTimeCallback = func() time.Duration { return time.Since(createTime) }
 	}
+	dynamicPacketSizeEnabled := !(maxPacketSize > teredoMTU || maxPacketSize == 0)
 	return &SocketMultiplexer{
-		logger:             logger,
-		packetTimeCallback: packetTimeCallback,
-		socketMap:          make(map[SocketMapKey]*Socket),
+		logger:                   logger,
+		packetTimeCallback:       packetTimeCallback,
+		socketMap:                make(map[SocketMapKey]*Socket),
+		maxPacketSize:            maxPacketSize,
+		dynamicPacketSizeEnabled: dynamicPacketSizeEnabled,
 	}
 }
 
@@ -1115,8 +1121,14 @@ type Socket struct {
 	// that are marked as needing to be re-sent (due to a timeout)
 	// don't count either
 	curWindow int
+
+	// dynamic packet size enabled
+	dynamicPacketSizeEnabled bool
 	// maximum window size, in bytes
 	maxWindow int
+	// maximum payloadSize
+	maxPacketSize int
+
 	// SO_SNDBUF setting, in bytes
 	optSendBufferSize int
 	// SO_RCVBUF setting, in bytes
@@ -2238,9 +2250,8 @@ func (s *Socket) GetPacketSize() int {
 
 	mtu := s.GetUDPMTU()
 
-	if DynamicPacketSizeEnabled {
-		maxPacketSize := getMaxPacketSize()
-		return minInt(mtu-headerSize, maxPacketSize)
+	if s.dynamicPacketSizeEnabled {
+		return minInt(mtu-headerSize, s.maxPacketSize)
 	}
 	return mtu - headerSize
 }
@@ -2776,6 +2787,8 @@ func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
 	key := SocketMapKey{
 		addr: conn.addrString, connSeed: conn.ConnSeed,
 	}
+	mx.mapLock.Lock()
+	defer mx.mapLock.Unlock()
 	foundConn, ok := mx.socketMap[key]
 	if ok {
 		dumbAssert(foundConn == conn)
@@ -2806,25 +2819,6 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 	conn.connIDSend = cid.sendId
 	conn.addr = addr
 	conn.addrString = addr.String()
-	key := SocketMapKey{
-		addr: conn.addrString, connSeed: conn.ConnSeed,
-	}
-	_, found := mx.socketMap[key]
-	if found {
-		// we can only have one Socket with a given same remote address
-		// associated with our underlying PacketConn (as we can only identify/
-		// distinguish connections by the 4-tuple of {local-ip, local-port,
-		// remote-ip, remote-port}).
-		err := &net.OpError{
-			Op:   "create",
-			Net:  "utp",
-			Addr: conn.addr,
-			Err:  errors.New("Socket already exists"),
-		}
-		conn = nil
-		return nil, err
-	}
-
 	currentMS := conn.getCurrentMS()
 
 	conn.SetCallbacks(nil, nil)
@@ -2850,6 +2844,8 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 
 	// we need to fit one packet in the window
 	// when we start the connection
+	conn.dynamicPacketSizeEnabled = mx.dynamicPacketSizeEnabled
+	conn.maxPacketSize = mx.maxPacketSize
 	conn.maxWindow = conn.GetPacketSize()
 	conn.state = csIdle
 
@@ -2859,6 +2855,26 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 	conn.outbuf.elements = make([]*outgoingPacket, 16)
 	conn.inbuf.elements = make([][]byte, 16)
 
+	key := SocketMapKey{
+		addr: conn.addrString, connSeed: conn.ConnSeed,
+	}
+	mx.mapLock.Lock()
+	defer mx.mapLock.Unlock()
+	_, found := mx.socketMap[key]
+	if found {
+		// we can only have one Socket with a given same remote address
+		// associated with our underlying PacketConn (as we can only identify/
+		// distinguish connections by the 4-tuple of {local-ip, local-port,
+		// remote-ip, remote-port}).
+		err := &net.OpError{
+			Op:   "create",
+			Net:  "utp",
+			Addr: conn.addr,
+			Err:  errors.New("Socket already exists"),
+		}
+		conn = nil
+		return nil, err
+	}
 	mx.socketMap[key] = conn
 
 	return conn, nil

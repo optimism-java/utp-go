@@ -63,7 +63,16 @@ func RandomUint32() uint32 {
 	return binary.LittleEndian.Uint32(buf[:])
 }
 
-func getMaxPacketSize() int { return 1500 }
+func RandomUint16() uint32 {
+	var buf [2]byte
+	_, err := io.ReadFull(rand.Reader, buf[:])
+	if err != nil {
+		panic("can't read from random source: " + err.Error())
+	}
+	return uint32(binary.LittleEndian.Uint16(buf[:]))
+}
+
+func getMaxPacketSize() int { return ethernetMTU }
 
 func delaySample(addr *net.UDPAddr, sampleMS int) {}
 

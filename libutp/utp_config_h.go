@@ -17,7 +17,7 @@ const (
 	// always less than the result of getMaxPacketSize() bytes.
 	//
 	// Really, this parameter is probably vestigial and has no current purpose.
-	DynamicPacketSizeEnabled = false
+	DynamicPacketSizeEnabled = true
 	// DynamicPacketSizeFactor is entirely unused and is also probably
 	// vestigial, related to DynamicPacketSizeEnabled.
 	DynamicPacketSizeFactor = 2
