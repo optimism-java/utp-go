@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/optimism-java/utp-go/libutp"
 	"io"
 	"os"
 	"time"
@@ -17,7 +18,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/optimism-java/utp-go/libutp"
 	"github.com/optimism-java/utp-go/libutp/utp_file"
 )
 

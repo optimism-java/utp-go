@@ -9,14 +9,13 @@ package utp_file
 import (
 	"errors"
 	"fmt"
+	"github.com/optimism-java/utp-go/libutp"
 	"net"
 	"syscall"
 	"time"
 
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
-
-	"github.com/optimism-java/utp-go/libutp"
 )
 
 // MaxOutgoingQueueSize is the maximum size of the outgoing queue.

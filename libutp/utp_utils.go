@@ -31,7 +31,7 @@ const (
 
 	udpIPv4MTU   = ethernetMTU - ipv4HeaderSize - udpHeaderSize - greHeaderSize - pppoeHeaderSize - mppeHeaderSize - fudgeHeaderSize
 	udpIPv6MTU   = ethernetMTU - ipv6HeaderSize - udpHeaderSize - greHeaderSize - pppoeHeaderSize - mppeHeaderSize - fudgeHeaderSize
-	udpTeredoMTU = teredoMTU - ipv6HeaderSize - udpHeaderSize
+	UdpTeredoMTU = teredoMTU - ipv6HeaderSize - udpHeaderSize
 )
 
 // GetUDPMTU returns a best guess as to the MTU (maximum transmission unit) on
@@ -40,7 +40,7 @@ func GetUDPMTU(addr *net.UDPAddr) uint16 {
 	// Since we don't know the local address of the interface,
 	// be conservative and assume all IPv6 connections are Teredo.
 	if isIPv6(addr.IP) {
-		return udpTeredoMTU
+		return UdpTeredoMTU
 	}
 	return udpIPv4MTU
 }
@@ -72,7 +72,7 @@ func RandomUint16() uint32 {
 	return uint32(binary.LittleEndian.Uint16(buf[:]))
 }
 
-func getMaxPacketSize() int { return ethernetMTU }
+func getMaxPacketSize() int { return 980 }
 
 func delaySample(addr *net.UDPAddr, sampleMS int) {}
 

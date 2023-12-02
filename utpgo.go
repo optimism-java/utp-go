@@ -9,6 +9,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/optimism-java/utp-go/buffers"
+	"github.com/optimism-java/utp-go/libutp"
 	"io"
 	"net"
 	"os"
@@ -18,9 +20,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-
-	"github.com/optimism-java/utp-go/buffers"
-	"github.com/optimism-java/utp-go/libutp"
 )
 
 // Buffer for data before it gets to µTP (there is another "send buffer" in
@@ -32,16 +31,11 @@ const (
 	// Make the read buffer larger than advertised, so that surplus bytes can be
 	// handled under certain conditions.
 	receiveBufferMultiplier = 2
-	connCheckInterval       = time.Duration(500) * time.Millisecond
-
-	utpDiscProtocolId = "0x757470"
 )
 
 var noopLogger = zap.NewNop()
 
 var ErrReceiveBufferOverflow = fmt.Errorf("receive buffer overflow")
-
-var ErrListenerIsClosed = fmt.Errorf("listener was closed")
 
 // Addr represents a µTP address.
 type Addr net.UDPAddr
@@ -54,7 +48,7 @@ func (a *Addr) String() string { return (*net.UDPAddr)(a).String() }
 
 // Conn represents a µTP connection.
 type Conn struct {
-	UtpSocket
+	utpSocket
 
 	logger *zap.Logger
 
@@ -102,48 +96,32 @@ type Conn struct {
 
 // Listener represents a listening µTP socket.
 type Listener struct {
-	UtpSocket
+	utpSocket
 
-	acceptChan <-chan *Conn
-
-	lock sync.Mutex
-
-	connSubscriber map[*ConnSubscriber]uint32
-
-	incomingConn map[uint32]*Conn
-
-	awaiting sync.Map
-
-	closed bool
-
-	cancel func()
-}
-
-// ConnSubscriber waiting for a connection to be accepted by the utp server
-type ConnSubscriber struct {
-	connId   uint32
-	receiver chan *Conn
+	acceptChan    <-chan *Conn
+	lock          sync.Mutex
+	incommingConn map[*Conn]uint32
 }
 
 func NewConnIdGenerator() libutp.ConnIdGenerator {
 	return libutp.NewConnIdGenerator()
 }
 
-// UtpSocket is shared functionality between Conn and Listener.
-type UtpSocket struct {
+// utpSocket is shared functionality between Conn and Listener.
+type utpSocket struct {
 	localAddr *net.UDPAddr
 
-	// Manager is shared by all sockets using the same local address
+	// manager is shared by all sockets using the same local address
 	// (for outgoing connections, only the one connection, but for incoming
 	// connections, this includes all connections received by the associated
 	// listening socket). It is reference-counted, and thus will only be
 	// cleaned up entirely when the last related socket is closed.
-	Manager *SocketManager
+	manager *SocketManager
 
-	// changes to encounteredError, Manager, or other state variables in Conn
+	// changes to encounteredError, manager, or other state variables in Conn
 	// or Listener should all be protected with this lock. If it must be
-	// acquired at the same time as Manager.baseConnLock, the
-	// Manager.baseConnLock must be acquired first.
+	// acquired at the same time as manager.baseConnLock, the
+	// manager.baseConnLock must be acquired first.
 	stateLock sync.Mutex
 
 	// Once set, all further Write/Read operations should fail with this error.
@@ -189,7 +167,6 @@ func DialUTPOptions(network string, localAddr, remoteAddr *Addr, options ...Conn
 		logger:    noopLogger,
 		ctx:       context.Background(),
 		tlsConfig: nil,
-		connId:    0,
 	}
 	for _, opt := range options {
 		opt(&s)
@@ -205,25 +182,20 @@ func DialUTPOptions(network string, localAddr, remoteAddr *Addr, options ...Conn
 }
 
 func dial(ctx context.Context, s *utpDialState, network string, localAddr, remoteAddr *Addr) (*Conn, error) {
+	s.logger = s.logger.With(zap.Stringer("remote-addr", remoteAddr))
 	manager, err := newSocketManager(s, network, (*net.UDPAddr)(localAddr), (*net.UDPAddr)(remoteAddr))
 	if err != nil {
 		return nil, err
 	}
-	var localUDPAddr *net.UDPAddr
-	if manager.UdpSocket != nil {
-		localUDPAddr = manager.LocalAddr().(*net.UDPAddr)
-	} else {
-		localUDPAddr = (*net.UDPAddr)(localAddr)
-	}
-
+	localUDPAddr := manager.LocalAddr().(*net.UDPAddr)
 	// different from managerLogger in case local addr interface and/or port
 	// has been clarified
 	connLogger := s.logger.With(zap.Stringer("local-addr", localUDPAddr), zap.Stringer("remote-addr", remoteAddr), zap.String("dir", "out"))
 
 	utpConn := &Conn{
-		UtpSocket: UtpSocket{
+		utpSocket: utpSocket{
 			localAddr: localUDPAddr,
-			Manager:   manager,
+			manager:   manager,
 		},
 		logger:            connLogger.Named("utp-conn"),
 		connecting:        true,
@@ -257,11 +229,14 @@ func dial(ctx context.Context, s *utpDialState, network string, localAddr, remot
 	manager.start()
 
 	func() {
-		// now that the Manager's goroutines have started, we do need
+		// now that the manager's goroutines have started, we do need
 		// concurrency protection
 		manager.baseConnLock.Lock()
 		defer manager.baseConnLock.Unlock()
 		connLogger.Debug("initiating libutp-level Connect()")
+		if manager.isShared {
+			manager.incrementReferences()
+		}
 		utpConn.baseConn.Connect()
 	}()
 
@@ -320,7 +295,7 @@ func ListenOptions(network, addr string, options ...ConnectOption) (net.Listener
 // ListenUTP creates a listening µTP socket on the local network address. It is
 // analogous to net.ListenUDP.
 func ListenUTP(network string, localAddr *Addr) (*Listener, error) {
-	return ListenUTPOptions(network, localAddr)
+	return listen(&utpDialState{}, network, localAddr)
 }
 
 // ListenUTPOptions creates a listening µTP socket on the given local network
@@ -340,49 +315,32 @@ func listen(s *utpDialState, network string, localAddr *Addr) (*Listener, error)
 	if err != nil {
 		return nil, err
 	}
-	var udpLocalAddr *net.UDPAddr
-	if manager.UdpSocket != nil {
-		udpLocalAddr = manager.LocalAddr().(*net.UDPAddr)
-	} else {
-		udpLocalAddr = (*net.UDPAddr)(localAddr)
-	}
+	udpLocalAddr := manager.LocalAddr().(*net.UDPAddr)
 	utpListener := &Listener{
-		UtpSocket: UtpSocket{
+		utpSocket: utpSocket{
 			localAddr: udpLocalAddr,
-			Manager:   manager,
+			manager:   manager,
 		},
-		acceptChan:     manager.acceptChan,
-		connSubscriber: make(map[*ConnSubscriber]uint32),
-		incomingConn:   make(map[uint32]*Conn),
+		acceptChan:    manager.acceptChan,
+		incommingConn: make(map[*Conn]uint32),
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	utpListener.cancel = cancel
-
 	manager.start()
-	manager.incrementReferences()
-
-	listenerLabels := pprof.Labels(
-		"name", "socket-listener", "udp-socket", localAddr.String())
-	go func() {
-		pprof.Do(ctx, listenerLabels, utpListener.listenInComingConn)
-	}()
-
 	return utpListener, nil
 }
 
 type utpDialState struct {
-	logger           *zap.Logger
-	ctx              context.Context
-	tlsConfig        *tls.Config
-	connId           uint32
-	blockPacketCount uint32
-	maxPacketSize    int
-	sa               *PacketRouter
-	sm               *SocketManager
+	logger          *zap.Logger
+	ctx             context.Context
+	tlsConfig       *tls.Config
+	blockQueueCount int
+	connId          uint32
+	sm              *SocketManager
+	maxPacketSize   int
+	pr              *PacketRouter
 }
 
 // ConnectOption is the interface which connection options should implement.
-type ConnectOption func(s *utpDialState)
+type ConnectOption func(state *utpDialState)
 
 // WithLogger creates a connection option which specifies a logger to be
 // attached to the connection. The logger will receive debugging messages
@@ -391,6 +349,14 @@ func WithLogger(logger *zap.Logger) ConnectOption {
 	return func(s *utpDialState) {
 		s.logger = logger
 	}
+}
+
+type optionContext struct {
+	ctx context.Context
+}
+
+func (o *optionContext) apply(s *utpDialState) {
+	s.ctx = o.ctx
 }
 
 // WithContext creates a connection option which specifies a context to be
@@ -411,33 +377,30 @@ func WithTLS(tlsConfig *tls.Config) ConnectOption {
 	}
 }
 
+// WithConnId Connect or Accept with certain connection id.If not specified, a random connection id will be generated.
 func WithConnId(connId uint32) ConnectOption {
 	return func(s *utpDialState) {
 		s.connId = connId
 	}
 }
 
-func WithBlockPacketCount(count uint32) ConnectOption {
-	return func(s *utpDialState) {
-		s.blockPacketCount = count
-	}
-}
-
-func WithPacketRouter(sa *PacketRouter) ConnectOption {
-	return func(s *utpDialState) {
-		s.sa = sa
-	}
-}
-
+// WithSocketManager can share SocketManager with other conn
 func WithSocketManager(sm *SocketManager) ConnectOption {
 	return func(s *utpDialState) {
 		s.sm = sm
 	}
 }
 
-func WithMaxPacketSize(m int) ConnectOption {
+// WithMaxPacketSize Will set the maximum packet size for the connection which will send out size of packet.
+func WithMaxPacketSize(size int) ConnectOption {
 	return func(s *utpDialState) {
-		s.maxPacketSize = m
+		s.maxPacketSize = size
+	}
+}
+
+func WithPacketRouter(pr *PacketRouter) ConnectOption {
+	return func(s *utpDialState) {
+		s.pr = pr
 	}
 }
 
@@ -462,8 +425,8 @@ func (c *Conn) Close() error {
 	err := func() error {
 		// yes, even libutp.(*UTPSocket).Close() needs concurrency protection;
 		// it may end up invoking callbacks
-		c.Manager.baseConnLock.Lock()
-		defer c.Manager.baseConnLock.Unlock()
+		c.manager.baseConnLock.Lock()
+		defer c.manager.baseConnLock.Unlock()
 		c.logger.Debug("closing baseConn")
 		c.libutpClosed = true
 		return c.baseConn.Close()
@@ -473,7 +436,7 @@ func (c *Conn) Close() error {
 	<-c.baseConnDestroyed
 
 	c.setEncounteredError(net.ErrClosed)
-	socketCloseErr := c.UtpSocket.Close()
+	socketCloseErr := c.utpSocket.Close()
 
 	// even if err was already set, this one is likely to be more helpful/interesting.
 	if socketCloseErr != nil {
@@ -535,9 +498,9 @@ func (c *Conn) ReadContext(ctx context.Context, buf []byte) (n int, err error) {
 			if n == 0 {
 				return 0, io.EOF
 			}
-			c.Manager.baseConnLock.Lock()
+			c.manager.baseConnLock.Lock()
 			c.baseConn.RBDrained()
-			c.Manager.baseConnLock.Unlock()
+			c.manager.baseConnLock.Unlock()
 			return n, nil
 		}
 		if encounteredErr != nil {
@@ -628,8 +591,8 @@ func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) 
 			// decrease between the SpaceUsed() call and the start of the next
 			// call to onWriteCallback.
 			func() {
-				c.Manager.baseConnLock.Lock()
-				defer c.Manager.baseConnLock.Unlock()
+				c.manager.baseConnLock.Lock()
+				defer c.manager.baseConnLock.Unlock()
 
 				amount := c.writeBuffer.SpaceUsed()
 				c.logger.Debug("informing libutp layer of data for writing", zap.Int("len", amount))
@@ -699,7 +662,7 @@ func (c *Conn) SetDeadline(t time.Time) error {
 }
 
 func (c *Conn) makeOpError(op string, err error) error {
-	opErr := c.UtpSocket.makeOpError(op, err).(*net.OpError) //nolint: errorlint
+	opErr := c.utpSocket.makeOpError(op, err).(*net.OpError) //nolint: errorlint
 	opErr.Source = opErr.Addr
 	opErr.Addr = c.RemoteAddr()
 	return opErr
@@ -708,56 +671,42 @@ func (c *Conn) makeOpError(op string, err error) error {
 var _ net.Conn = &Conn{}
 
 // AcceptUTPContext accepts a new µTP connection on a listening socket.
-func (l *Listener) AcceptUTPContext(ctx context.Context, connId uint32) (*Conn, error) {
-	if l.closed {
-		return nil, ErrListenerIsClosed
-	}
-	l.lock.Lock()
-	if conn := l.pollConn(connId); conn != nil {
-		l.lock.Unlock()
-		return conn, nil
-	}
-	if connId != 0 {
-		if _, exists := l.awaiting.LoadOrStore(connId, true); exists {
-			l.lock.Unlock()
-			return nil, fmt.Errorf("the connId is already exists: %d", connId)
-		}
-	}
-	subscriber := &ConnSubscriber{
-		connId:   connId,
-		receiver: make(chan *Conn),
-	}
-	l.connSubscriber[subscriber] = connId
-	l.lock.Unlock()
-
+func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Conn, error) {
+	ticker := time.NewTicker(time.Millisecond * 100)
 	for {
+		l.lock.Lock()
+		defer l.lock.Unlock()
 		select {
-		case conn := <-subscriber.receiver:
-			if conn == nil && l.closed {
-				return nil, net.ErrClosed
+		case newConn, ok := <-l.acceptChan:
+			if ok {
+				if connIdSeed == 0 || newConn.baseConn.ConnSeed == connIdSeed {
+					return newConn, nil
+				}
+				l.incommingConn[newConn] = newConn.baseConn.ConnSeed
+				continue
 			}
-			return conn, nil
+			err := l.encounteredError
+			if err == nil {
+				err = l.makeOpError("accept", net.ErrClosed)
+			}
+			return nil, err
+		case <-ticker.C:
+			if len(l.incommingConn) == 0 {
+				continue
+			}
+			for conn, connId := range l.incommingConn {
+				if connIdSeed == 0 || connId == connIdSeed {
+					return conn, nil
+				}
+			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
 }
 
-func (l *Listener) pollConn(connId uint32) *Conn {
-	if len(l.incomingConn) == 0 {
-		return nil
-	}
-	if connId == 0 {
-		for key, _ := range l.incomingConn {
-			connId = key
-			break
-		}
-	}
-	if conn, ok := l.incomingConn[connId]; ok {
-		delete(l.incomingConn, connId)
-		return conn
-	}
-	return nil
+func (l *Listener) AcceptUTPWithConnId(connId uint32) (*Conn, error) {
+	return l.AcceptUTPContext(context.Background(), connId)
 }
 
 // AcceptUTP accepts a new µTP connection on a listening socket.
@@ -765,17 +714,9 @@ func (l *Listener) AcceptUTP() (*Conn, error) {
 	return l.AcceptUTPContext(context.Background(), 0)
 }
 
-func (l *Listener) AcceptUTPWithConnId(connId uint32) (*Conn, error) {
-	return l.AcceptUTPContext(context.Background(), connId)
-}
-
 // Accept accepts a new µTP connection on a listening socket.
 func (l *Listener) Accept() (net.Conn, error) {
 	return l.AcceptUTP()
-}
-
-func (l *Listener) AcceptWithConnId(connId uint32) (*Conn, error) {
-	return l.AcceptUTPWithConnId(connId)
 }
 
 // AcceptContext accepts a new µTP connection on a listening socket.
@@ -785,90 +726,17 @@ func (l *Listener) AcceptContext(ctx context.Context) (net.Conn, error) {
 
 // Close closes a Listener.
 func (l *Listener) Close() error {
-	l.lock.Lock()
-	defer l.lock.Unlock()
-	l.closed = true
-	for subscriber := range l.connSubscriber {
-		close(subscriber.receiver)
-	}
-	l.cancel()
-	return l.UtpSocket.Close()
+	return l.utpSocket.Close()
 }
 
 // Addr returns the local address of a Listener.
 func (l *Listener) Addr() net.Addr {
-	return l.UtpSocket.LocalAddr()
-}
-
-func (l *Listener) listenInComingConn(ctx context.Context) {
-	incomingTicker := time.NewTicker(connCheckInterval)
-	defer incomingTicker.Stop()
-	for {
-		select {
-		case newConn, ok := <-l.acceptChan:
-			if ok {
-				l.handleNewConn(newConn)
-				continue
-			}
-			err := l.encounteredError
-			if err == nil {
-				err = l.makeOpError("accept", net.ErrClosed)
-			}
-		case <-incomingTicker.C:
-			l.handleCheck()
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func (l *Listener) handleNewConn(conn *Conn) {
-	var connId uint32
-	l.lock.Lock()
-	defer l.lock.Unlock()
-	if _, loaded := l.awaiting.LoadAndDelete(conn.baseConn.ConnSeed); loaded {
-		connId = conn.baseConn.ConnSeed
-	}
-
-	// find a receiver
-	var found bool
-	for subscriber, waitConnId := range l.connSubscriber {
-		if waitConnId == connId {
-			found = true
-			subscriber.receiver <- conn
-			delete(l.connSubscriber, subscriber)
-			break
-		}
-	}
-
-	// if nobody waits for conn, conn will be put into incomingConn
-	if !found {
-		l.incomingConn[conn.baseConn.ConnSeed] = conn
-	}
-}
-
-func (l *Listener) handleCheck() {
-	l.lock.Lock()
-	defer l.lock.Unlock()
-	if len(l.connSubscriber) == 0 || len(l.incomingConn) == 0 {
-		return
-	}
-	for subscriber, waitConnId := range l.connSubscriber {
-		if waitConnId != 0 {
-			continue
-		}
-		for key, conn := range l.incomingConn {
-			subscriber.receiver <- conn
-			delete(l.incomingConn, key)
-			break
-		}
-	}
-
+	return l.utpSocket.LocalAddr()
 }
 
 var _ net.Listener = &Listener{}
 
-func (u *UtpSocket) makeOpError(op string, err error) error {
+func (u *utpSocket) makeOpError(op string, err error) error {
 	return &net.OpError{
 		Op:     op,
 		Net:    "utp",
@@ -878,11 +746,11 @@ func (u *UtpSocket) makeOpError(op string, err error) error {
 	}
 }
 
-func (u *UtpSocket) Close() (err error) {
+func (u *utpSocket) Close() (err error) {
 	u.stateLock.Lock()
-	if u.Manager != nil {
-		err = u.Manager.decrementReferences()
-		u.Manager = nil
+	if u.manager != nil {
+		err = u.manager.decrementReferences()
+		u.manager = nil
 	}
 	u.stateLock.Unlock()
 	return err
@@ -905,29 +773,39 @@ func (c *Conn) setEncounteredError(err error) {
 	}
 }
 
-func (u *UtpSocket) LocalAddr() net.Addr {
+func (u *utpSocket) LocalAddr() net.Addr {
 	return (*Addr)(u.localAddr)
-}
-
-type UdpMessage struct {
-	Buf  []byte
-	Addr *net.UDPAddr
 }
 
 type MessageWriter func(buf []byte, addr *net.UDPAddr) (int, error)
 
-type MessageReceiver func() ([]byte, *net.UDPAddr, error)
+type PacketRouter struct {
+	udpSocket *net.UDPConn
+	sm        *SocketManager
+	mw        MessageWriter
+}
+
+func NewPacketRouter(mw MessageWriter) *PacketRouter {
+	return &PacketRouter{
+		mw: mw,
+	}
+}
+
+func (pr *PacketRouter) WriteMsg(buf []byte, addr *net.UDPAddr) (int, error) {
+	return pr.mw(buf, addr)
+}
+
+func (pr *PacketRouter) ReceiveMessage(buf []byte, addr *net.UDPAddr) {
+	go func() {
+		pr.sm.processIncomingPacket(buf, addr)
+	}()
+}
 
 type SocketManager struct {
 	mx        *libutp.SocketMultiplexer
 	logger    *zap.Logger
-	localAddr *net.UDPAddr
-	UdpSocket *net.UDPConn
-	msgWriter MessageWriter
-	sa        *PacketRouter
-	msgSig    chan *UdpMessage
-
-	startOnce sync.Once
+	pr        *PacketRouter
+	udpSocket *net.UDPConn
 
 	// this lock should be held when invoking any libutp functions or methods
 	// that are not thread-safe or which themselves might invoke callbacks
@@ -958,13 +836,18 @@ type SocketManager struct {
 	socketErrorsLock sync.Mutex
 
 	pollInterval time.Duration
+
+	startOnce  sync.Once
+	localAddr  *net.UDPAddr
+	remoteAddr *net.UDPAddr
+	isShared   bool
 }
 
 const (
-	defaultUTPConnBacklogSize = 100
+	defaultUTPConnBacklogSize = 5
 )
 
-func NewSocketManager(network string, localAddr *net.UDPAddr, options ...ConnectOption) (*SocketManager, error) {
+func NewSocketManagerWithOptions(network string, localAddr *net.UDPAddr, options ...ConnectOption) (*SocketManager, error) {
 	s := utpDialState{
 		logger: noopLogger,
 	}
@@ -974,11 +857,11 @@ func NewSocketManager(network string, localAddr *net.UDPAddr, options ...Connect
 	return newSocketManager(&s, network, localAddr, nil)
 }
 
-func newSocketManager(s *utpDialState, network string, localAddr, remoteAddr *net.UDPAddr) (sm *SocketManager, err error) {
+func newSocketManager(s *utpDialState, network string, localAddr, remoteAddr *net.UDPAddr) (*SocketManager, error) {
 	if s.sm != nil {
+		s.sm.isShared = true
 		return s.sm, nil
 	}
-	managerLogger := s.logger.With(zap.Stringer("remote-addr", remoteAddr))
 	switch network {
 	case "utp", "utp4", "utp6":
 	default:
@@ -989,49 +872,41 @@ func newSocketManager(s *utpDialState, network string, localAddr, remoteAddr *ne
 		return nil, &net.OpError{Op: op, Net: network, Source: localAddr, Addr: remoteAddr, Err: net.UnknownNetworkError(network)}
 	}
 
-	var udpSocket *net.UDPConn
-	var msgWriter MessageWriter
-	if s.sa == nil {
+	if s.pr == nil {
 		udpNetwork := "udp" + network[3:]
-		udpSocket, err = net.ListenUDP(udpNetwork, localAddr)
+		udpSocket, err := net.ListenUDP(udpNetwork, localAddr)
 		if err != nil {
 			return nil, err
 		}
-		msgWriter = func(buf []byte, addr *net.UDPAddr) (int, error) {
-			n, err := udpSocket.WriteToUDP(buf, addr)
-			if err != nil {
-				sm.registerSocketError(err)
-			}
-			sm.logger.Debug("send buf and write to socket len", zap.Int("len", n), zap.Int("buf-length", len(buf)))
-			return n, nil
+		s.pr = &PacketRouter{
+			udpSocket: udpSocket,
+			mw: func(buf []byte, addr *net.UDPAddr) (int, error) {
+				return udpSocket.WriteToUDP(buf, addr)
+			},
 		}
-	} else {
-		msgWriter = s.sa.msgWriter
 	}
+	var localAddrStr fmt.Stringer
+	if s.pr.udpSocket != nil {
+		localAddrStr = s.pr.udpSocket.LocalAddr()
+	}
+
 	// thread-safe here; don't need baseConnLock
-	mx := libutp.NewSocketMultiplexer(managerLogger.Named("mx").With(zap.Stringer("local-addr", localAddr)), nil, s.maxPacketSize)
-	sigQueueLen := uint32(50)
-	if s.blockPacketCount != 0 {
-		sigQueueLen = s.blockPacketCount
-	}
-	sm = &SocketManager{
+	mx := libutp.NewSocketMultiplexer(s.logger.Named("mx").With(zap.Stringer("local-addr", localAddrStr)), nil, s.maxPacketSize)
+
+	sm := &SocketManager{
 		mx:           mx,
-		logger:       managerLogger.Named("Manager").With(zap.Stringer("local-addr", localAddr)),
-		UdpSocket:    udpSocket,
-		localAddr:    localAddr,
-		msgWriter:    msgWriter,
-		sa:           s.sa,
-		msgSig:       make(chan *UdpMessage, sigQueueLen),
+		logger:       s.logger.Named("manager").With(zap.Stringer("local-addr", localAddrStr)),
+		pr:           s.pr,
 		refCount:     1,
 		closeErr:     make(chan error),
 		acceptChan:   make(chan *Conn, defaultUTPConnBacklogSize),
 		pollInterval: 5 * time.Millisecond,
+		localAddr:    localAddr,
+		remoteAddr:   remoteAddr,
+		isShared:     false,
 	}
-	if s.sa != nil {
-		s.sa.registerListener(localAddr, sm)
-	}
-
-	return
+	sm.pr.sm = sm
+	return sm, nil
 }
 
 func (sm *SocketManager) start() {
@@ -1041,25 +916,33 @@ func (sm *SocketManager) start() {
 
 		managementLabels := pprof.Labels(
 			"name", "socket-management", "udp-socket", sm.LocalAddr().String())
+		receiverLabels := pprof.Labels(
+			"name", "udp-receiver", "udp-socket", sm.LocalAddr().String())
 		go func() {
 			pprof.Do(ctx, managementLabels, sm.socketManagement)
 		}()
-		receiverLabels := pprof.Labels(
-			"name", "udp-receiver", "udp-socket", sm.LocalAddr().String())
 		go func() {
 			pprof.Do(ctx, receiverLabels, sm.udpMessageReceiver)
 		}()
 	})
+
 }
 
 func (sm *SocketManager) LocalAddr() net.Addr {
-	if sm.UdpSocket != nil {
-		return sm.UdpSocket.LocalAddr()
+	if sm.pr.udpSocket != nil {
+		return sm.pr.udpSocket.LocalAddr()
 	} else {
 		return sm.localAddr
 	}
 }
 
+func (sm *SocketManager) RemoteAddr() net.Addr {
+	if sm.pr.udpSocket != nil {
+		return sm.pr.udpSocket.RemoteAddr()
+	} else {
+		return sm.remoteAddr
+	}
+}
 func (sm *SocketManager) socketManagement(ctx context.Context) {
 	timer := time.NewTimer(sm.pollInterval)
 	defer timer.Stop()
@@ -1091,8 +974,8 @@ func (sm *SocketManager) checkTimeouts() {
 
 func (sm *SocketManager) internalClose() {
 	var err error
-	if sm.UdpSocket != nil {
-		err = sm.UdpSocket.Close()
+	if sm.pr.udpSocket != nil {
+		err = sm.pr.udpSocket.Close()
 	}
 	sm.mx = nil
 	sm.closeErr <- err
@@ -1111,77 +994,49 @@ func (sm *SocketManager) decrementReferences() error {
 	defer sm.refCountLock.Unlock()
 	sm.refCount--
 	if sm.refCount == 0 {
-		sm.logger.Info("closing socketManager")
+		sm.logger.Info("closing SocketManager")
 		sm.cancelManagement()
 		return <-sm.closeErr
 	}
 	if sm.refCount < 0 {
-		return errors.New("socketManager closed too many times")
+		return errors.New("SocketManager closed too many times")
 	}
 	return nil
 }
 
-func (sm *SocketManager) readMessage(ctx context.Context) {
-	bufSize := int(libutp.GetUDPMTU(sm.LocalAddr().(*net.UDPAddr)) * 2)
-	b := make([]byte, bufSize)
-	go func() {
-		for {
-			var err error
-			var n int
-			var addr *net.UDPAddr
-			if sm.UdpSocket == nil {
-				return
-			}
-			var flags int
-			n, _, flags, addr, err = sm.UdpSocket.ReadMsgUDP(b, nil)
-			if err != nil {
-				if ctx.Err() != nil {
-					// we expect an error here; the socket has been closed; it's fine
-					return
-				}
-				sm.registerSocketError(err)
-				continue
-			}
-			if flags&msg_trunc != 0 {
-				// we didn't get the whole packet. don't pass it on to µTP; it
-				// won't recognize the truncation and will pretend like that's
-				// all the data there is. let the packet loss detection stuff
-				// do its part instead.
-				continue
-			}
-			select {
-			case sm.msgSig <- &UdpMessage{b[:n], addr}:
-			case <-ctx.Done():
-				return
-			}
-
-		}
-	}()
-}
-
 func (sm *SocketManager) udpMessageReceiver(ctx context.Context) {
-	sm.readMessage(ctx)
+	if sm.pr.udpSocket == nil {
+		return
+	}
 	// thread-safe; don't need baseConnLock for GetUDPMTU
+	bufSize := libutp.GetUDPMTU(sm.LocalAddr().(*net.UDPAddr))
 	// It turns out GetUDPMTU is frequently wrong, and when it gives us a lower
 	// number than the real MTU, and the other side is sending bigger packets,
 	// then we end up not being able to read the full packets. Start with a
 	// receive buffer twice as big as we thought we might need, and increase it
 	// further from there if needed.
-	bufSize := int(libutp.GetUDPMTU(sm.LocalAddr().(*net.UDPAddr)) * 2)
-	sm.logger.Info("udp message receiver started", zap.Int("receive-buf-size", bufSize))
+	bufSize *= 2
+	sm.logger.Info("udp message receiver started", zap.Uint16("receive-buf-size", bufSize))
+	b := make([]byte, bufSize)
 	for {
-		select {
-		case msg := <-sm.msgSig:
-			n := len(msg.Buf)
-			if bufSize < n {
-				n = bufSize
+		n, _, flags, addr, err := sm.pr.udpSocket.ReadMsgUDP(b, nil)
+		if err != nil {
+			if ctx.Err() != nil {
+				// we expect an error here; the socket has been closed; it's fine
+				return
 			}
-			sm.logger.Debug("udp received bytes", zap.Int("len", n))
-			sm.processIncomingPacket(msg.Buf[:n], msg.Addr)
-		case <-ctx.Done():
-			return
-
+			sm.registerSocketError(err)
+			continue
 		}
+		if flags&msg_trunc != 0 {
+			// we didn't get the whole packet. don't pass it on to µTP; it
+			// won't recognize the truncation and will pretend like that's
+			// all the data there is. let the packet loss detection stuff
+			// do its part instead.
+			continue
+		}
+		sm.logger.Debug("udp received bytes", zap.Int("len", n))
+		sm.processIncomingPacket(b[:n], addr)
 	}
 }
 
@@ -1192,28 +1047,10 @@ func (sm *SocketManager) registerSocketError(err error) {
 	sm.socketErrors = append(sm.socketErrors, err)
 }
 
-type PacketRouter struct {
-	msgWriter MessageWriter
-	sm        *SocketManager
-}
-
-func NewSocketRouter(msgWriter MessageWriter) *PacketRouter {
-	return &PacketRouter{
-		msgWriter: msgWriter,
-	}
-}
-
-func (sa *PacketRouter) ReceiveMessage(data []byte, addr *net.UDPAddr) {
-	sa.sm.msgSig <- &UdpMessage{Buf: data, Addr: addr}
-}
-
-func (sa *PacketRouter) registerListener(addr *net.UDPAddr, manager *SocketManager) {
-	sa.sm = manager
-}
-
 func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Socket) {
 	sm := userdata.(*SocketManager)
-	if sm.UdpSocket != nil && sm.UdpSocket.RemoteAddr() != nil {
+	remoteAddr := sm.RemoteAddr()
+	if remoteAddr != nil && !sm.isShared {
 		// this is not a listening-mode socket! we'll reject this spurious packet
 		_ = newBaseConn.Close()
 		return
@@ -1222,9 +1059,9 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 
 	connLogger := sm.logger.Named("utp-socket").With(zap.String("dir", "in"), zap.Stringer("remote-addr", newBaseConn.GetPeerName()))
 	newUTPConn := &Conn{
-		UtpSocket: UtpSocket{
+		utpSocket: utpSocket{
 			localAddr: sm.LocalAddr().(*net.UDPAddr),
-			Manager:   sm,
+			manager:   sm,
 		},
 		logger:            connLogger,
 		baseConn:          newBaseConn,
@@ -1244,7 +1081,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 	newUTPConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, readBufferSize)
 	select {
 	case sm.acceptChan <- newUTPConn:
-		// it's the socketManager's problem now
+		// it's the SocketManager's problem now
 	default:
 		sm.logger.Info("dropping new connection because full backlog", zap.Stringer("remote-addr", newUTPConn.RemoteAddr()))
 		// The accept backlog is full; drop this new connection. We can't call
@@ -1252,17 +1089,17 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		// Fortunately, most of the steps done there aren't necessary here
 		// because we have never exposed this instance to the user.
 		_ = newUTPConn.baseConn.Close()
-		// This step will decref the socketManager back to where it was before
+		// This step will decref the SocketManager back to where it was before
 		// this instance was created.
-		_ = newUTPConn.Manager.decrementReferences()
-		newUTPConn.Manager = nil
+		_ = newUTPConn.manager.decrementReferences()
+		newUTPConn.manager = nil
 	}
 }
 
 func packetSendCallback(userdata interface{}, buf []byte, addr *net.UDPAddr) {
 	sm := userdata.(*SocketManager)
-	sm.logger.Debug("udp sending bytes", zap.Int("len", len(buf)), zap.String("remote-addr", addr.String()))
-	_, err := sm.msgWriter(buf, addr)
+	sm.logger.Debug("udp sending bytes", zap.Int("len", len(buf)))
+	_, err := sm.pr.WriteMsg(buf, addr)
 	if err != nil {
 		sm.registerSocketError(err)
 	}

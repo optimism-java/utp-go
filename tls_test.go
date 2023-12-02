@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"github.com/optimism-java/utp-go"
 	"io"
 	"net"
 	"strconv"
@@ -18,6 +17,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+
+	"github.com/optimism-java/utp-go"
 )
 
 const (

@@ -9,6 +9,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/optimism-java/utp-go/libutp"
 	"io"
 	"net"
 	"os"
@@ -18,7 +19,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/optimism-java/utp-go/libutp"
 	"github.com/optimism-java/utp-go/libutp/utp_file"
 )
 
@@ -91,7 +91,7 @@ func main() {
 		logger.Fatal("could not resolve destination", zap.String("dest", dest), zap.Error(err))
 	}
 
-	s, err := sm.Create(cbSendTo, sm, udpAddr, libutp.SendCid(21))
+	s, err := sm.Create(cbSendTo, sm, udpAddr, libutp.SendCid(libutp.RandomUint16()))
 	if err != nil {
 		logger.Fatal("could not connect", zap.Stringer("dest-addr", udpAddr), zap.Error(err))
 	}

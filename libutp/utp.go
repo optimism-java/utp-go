@@ -181,6 +181,12 @@ func (g *DefaultConnIdGenerator) Remove(c *ConnId) {
 	}
 }
 
+type SocketMapKey struct {
+	ip       net.IP
+	port     int
+	connSeed uint32
+}
+
 // SocketMultiplexer coordinates µTP sockets that are sharing a single underlying
 // PacketConn.
 type SocketMultiplexer struct {
@@ -193,14 +199,9 @@ type SocketMultiplexer struct {
 
 	rstInfo                  []rstInfo
 	mapLock                  sync.Mutex
-	socketMap                map[SocketMapKey]*Socket
-	dynamicPacketSizeEnabled bool
+	socketMap                map[string]*Socket
 	maxPacketSize            int
-}
-
-type SocketMapKey struct {
-	addr     string
-	connSeed uint32
+	dynamicPacketSizeEnabled bool
 }
 
 // NewSocketMultiplexer creates a new instance of SocketMultiplexer.
@@ -209,11 +210,12 @@ func NewSocketMultiplexer(logger *zap.Logger, packetTimeCallback func() time.Dur
 		createTime := time.Now()
 		packetTimeCallback = func() time.Duration { return time.Since(createTime) }
 	}
-	dynamicPacketSizeEnabled := !(maxPacketSize > teredoMTU || maxPacketSize == 0)
+	dynamicPacketSizeEnabled := !(maxPacketSize <= 0 || maxPacketSize > UdpTeredoMTU)
+
 	return &SocketMultiplexer{
 		logger:                   logger,
 		packetTimeCallback:       packetTimeCallback,
-		socketMap:                make(map[SocketMapKey]*Socket),
+		socketMap:                make(map[string]*Socket),
 		maxPacketSize:            maxPacketSize,
 		dynamicPacketSizeEnabled: dynamicPacketSizeEnabled,
 	}
@@ -1121,14 +1123,8 @@ type Socket struct {
 	// that are marked as needing to be re-sent (due to a timeout)
 	// don't count either
 	curWindow int
-
-	// dynamic packet size enabled
-	dynamicPacketSizeEnabled bool
 	// maximum window size, in bytes
 	maxWindow int
-	// maximum payloadSize
-	maxPacketSize int
-
 	// SO_SNDBUF setting, in bytes
 	optSendBufferSize int
 	// SO_RCVBUF setting, in bytes
@@ -1212,9 +1208,9 @@ type Socket struct {
 
 	ConnSeed uint32
 	// Connection ID for packets I receive
-	connIDRecv uint32
+	ConnIDRecv uint32
 	// Connection ID for packets I send
-	connIDSend uint32
+	ConnIDSend uint32
 	// Last rcv window we advertised, in bytes
 	lastReceiveWindow int
 
@@ -1233,7 +1229,9 @@ type Socket struct {
 
 	packetTimeCallback func() time.Duration
 
-	logger *zap.Logger
+	logger                   *zap.Logger
+	maxPacketSize            int
+	dynamicPacketSizeEnabled bool
 }
 
 func (s *Socket) getCurrentMS() uint32 {
@@ -1390,7 +1388,7 @@ func (s *Socket) sendData(b packetHeader, data []byte, bwType BandwidthType, cur
 	seqNum := b.getSequenceNumber()
 	ackNum := b.getAckNumber()
 
-	s.logger.Debug("send-data", zap.Int("len", len(data)), zap.Uint32("id", s.connIDSend), zap.Uint64("timestamp", packetTime), zap.Uint32("reply_micro", s.replyMicro), zap.Stringer("flags", flags), zap.Uint16("seq_nr", seqNum), zap.Uint16("ack_nr", ackNum))
+	s.logger.Debug("send-data", zap.Int("len", len(data)), zap.Uint32("id", s.ConnIDSend), zap.Uint64("timestamp", packetTime), zap.Uint32("reply_micro", s.replyMicro), zap.Stringer("flags", flags), zap.Uint16("seq_nr", seqNum), zap.Uint16("ack_nr", ackNum))
 
 	sendToAddr(s.sendToCB, s.sendToUserdata, data, s.addr)
 }
@@ -1404,7 +1402,7 @@ func (s *Socket) sendAck(synack bool, currentMS uint32) {
 	}
 	s.lastReceiveWindow = s.getRcvWindow()
 	pa.setVersion(s.version)
-	pa.setConnID(s.connIDSend)
+	pa.setConnID(s.ConnIDSend)
 	pa.setPacketType(stState)
 	pa.setAckNumber(s.ackNum)
 	pa.setSequenceNumber(s.seqNum)
@@ -1437,12 +1435,12 @@ func (s *Socket) sendAck(synack bool, currentMS uint32) {
 			}
 		}
 		pa.setAcks(m)
-		s.logger.Debug("Sending EACK", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.connIDSend), zap.Uint32("bits", m))
+		s.logger.Debug("Sending EACK", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.ConnIDSend), zap.Uint32("bits", m))
 	} else if synack {
 		// we only send "extensions" in response to SYN
 		// and the reorder count is 0 in that state
 
-		s.logger.Debug("Sending ACK with extension bits", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.connIDSend))
+		s.logger.Debug("Sending ACK with extension bits", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.ConnIDSend))
 		switch pfa := pa.(type) {
 		case *packetFormatAck:
 			pa = &packetFormatExtensions{packetFormatAck: *pfa}
@@ -1453,18 +1451,17 @@ func (s *Socket) sendAck(synack bool, currentMS uint32) {
 		pa.setExtNext(0)
 		pa.setExtLen(8)
 	} else {
-		s.logger.Debug("Sending ACK", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.connIDSend))
+		s.logger.Debug("Sending ACK", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.ConnIDSend))
 	}
 
 	s.sentAck(currentMS)
 	packetData := make([]byte, pa.encodedSize())
-	s.logger.Debug("Send ack", zap.Any("phType", pa.getPacketType()), zap.Any("phConnId", pa.getConnID()), zap.Any("packetSize", len(packetData)))
 	s.sendData(pa, packetData, AckOverhead, currentMS)
 }
 
 func (s *Socket) sendKeepAlive(currentMS uint32) {
 	s.ackNum--
-	s.logger.Debug("Sending KeepAlive ACK", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.connIDSend))
+	s.logger.Debug("Sending KeepAlive ACK", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.ConnIDSend))
 	s.sendAck(false, currentMS)
 	s.ackNum++
 }
@@ -1524,7 +1521,6 @@ func (s *Socket) sendPacket(pkt *outgoingPacket, currentMS uint32) {
 	} else if pkt.transmissions != 1 {
 		bwType = RetransmitOverhead
 	}
-	s.logger.Debug("Send packet", zap.Any("phType", pkt.header.getPacketType()), zap.Any("phConnId", pkt.header.getConnID()), zap.Any("packetSize", len(pkt.data)))
 	s.sendData(pkt.header, pkt.data, bwType, currentMS)
 }
 
@@ -1682,7 +1678,7 @@ func (s *Socket) writeOutgoingPacket(payload int, flags packetFlag, currentMS ui
 
 		header := pkt.header
 		header.setVersion(s.version)
-		header.setConnID(s.connIDSend)
+		header.setConnID(s.ConnIDSend)
 		header.setWindowSize(s.lastReceiveWindow)
 		header.setExt(0)
 		header.setAckNumber(s.ackNum)
@@ -2784,15 +2780,12 @@ func detectVersion(packetBytes []byte) int8 {
 func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
 	conn.logger.Debug("Killing socket")
 
-	key := SocketMapKey{
-		addr: conn.addrString, connSeed: conn.ConnSeed,
-	}
 	mx.mapLock.Lock()
 	defer mx.mapLock.Unlock()
-	foundConn, ok := mx.socketMap[key]
+	foundConn, ok := mx.socketMap[fmt.Sprintf("%s_%d_%d", conn.addrString, conn.ConnIDSend, conn.ConnIDRecv)]
 	if ok {
 		dumbAssert(foundConn == conn)
-		delete(mx.socketMap, key)
+		delete(mx.socketMap, fmt.Sprintf("%s_%d_%d", conn.addrString, conn.ConnIDSend, conn.ConnIDRecv))
 	}
 
 	if ok {
@@ -2801,6 +2794,7 @@ func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
 	}
 }
 
+// Create a µTP socket for communication with a peer at the given address.
 // Create a µTP socket for communication with a peer at the given address.
 func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr, cid *ConnId) (*Socket, error) {
 	conn := &Socket{logger: mx.logger, packetTimeCallback: mx.packetTimeCallback}
@@ -2815,8 +2809,8 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 		cid.sendId &= 0xffff
 	}
 	conn.ConnSeed = cid.connSeed
-	conn.connIDRecv = cid.recvId
-	conn.connIDSend = cid.sendId
+	conn.ConnIDRecv = cid.recvId
+	conn.ConnIDSend = cid.sendId
 	conn.addr = addr
 	conn.addrString = addr.String()
 	currentMS := conn.getCurrentMS()
@@ -2855,12 +2849,9 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 	conn.outbuf.elements = make([]*outgoingPacket, 16)
 	conn.inbuf.elements = make([][]byte, 16)
 
-	key := SocketMapKey{
-		addr: conn.addrString, connSeed: conn.ConnSeed,
-	}
 	mx.mapLock.Lock()
 	defer mx.mapLock.Unlock()
-	_, found := mx.socketMap[key]
+	_, found := mx.socketMap[fmt.Sprintf("%s_%d_%d", conn.addrString, conn.ConnIDSend, conn.ConnIDRecv)]
 	if found {
 		// we can only have one Socket with a given same remote address
 		// associated with our underlying PacketConn (as we can only identify/
@@ -2870,12 +2861,11 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 			Op:   "create",
 			Net:  "utp",
 			Addr: conn.addr,
-			Err:  errors.New("Socket already exists"),
+			Err:  syscall.EADDRINUSE,
 		}
-		conn = nil
 		return nil, err
 	}
-	mx.socketMap[key] = conn
+	mx.socketMap[fmt.Sprintf("%s_%d_%d", conn.addrString, conn.ConnIDSend, conn.ConnIDRecv)] = conn
 
 	return conn, nil
 }
@@ -2977,8 +2967,17 @@ func (s *Socket) Connect() {
 
 	currentMS := s.getCurrentMS()
 
+	// Create and send a connect message
+	connSeed := RandomUint32()
+
+	// we identify newer versions by setting the
+	// first two bytes to 0x0001
+	if s.version > 0 {
+		connSeed &= 0xffff
+	}
+
 	// used in parse_log.py
-	s.logger.Info("UTP_Connect", zap.Uint32("conn_seed", s.ConnSeed), zap.Int("packet_size", packetSize), zap.Duration("target_delay", congestionControlTarget*time.Microsecond), zap.Int("delay_history", curDelaySize), zap.Int("delay_base_history", delayBaseHistory))
+	s.logger.Info("UTP_Connect", zap.Uint32("conn_seed", connSeed), zap.Int("packet_size", packetSize), zap.Duration("target_delay", congestionControlTarget*time.Microsecond), zap.Int("delay_history", curDelaySize), zap.Int("delay_base_history", delayBaseHistory))
 
 	// Setup initial timeout timer.
 	s.retransmitTimeout = 3000
@@ -3012,8 +3011,8 @@ func (s *Socket) Connect() {
 	pa.setVersion(s.version)
 
 	// SYN packets are special, and have the receive ID in the connID field,
-	// instead of connIDSend.
-	pa.setConnID(s.connIDRecv)
+	// instead of ConnIDSend.
+	pa.setConnID(s.ConnIDRecv)
 	pa.setExt(2)
 	pa.setPacketType(stSyn)
 	pa.setWindowSize(s.lastReceiveWindow)
@@ -3065,13 +3064,13 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		mx.logger.Debug("recv packet too small for apparent format version", zap.Int("len", len(buffer)), zap.Int8("utp-version", version))
 		return false
 	}
-	id := ph.getConnID()
 
-	mx.logger.Debug("recv", zap.Int("len", len(buffer)), zap.Uint32("id", id), zap.Uint16("seq_nr", ph.getSequenceNumber()), zap.Uint16("ack_nr", ph.getAckNumber()))
+	id := ph.getConnID()
+	mx.logger.Debug("recv", zap.Int("len", len(buffer)), zap.Uint32("id", id), zap.Uint16("seq_nr", ph.getSequenceNumber()), zap.Uint16("ack_nr", ph.getAckNumber()), zap.Any("src_addr", toAddr.String()))
 
 	flags := ph.getPacketType()
 	for _, conn := range mx.socketMap {
-		// conn.logger.Debug("Examining Socket", zap.Stringer("source", conn.addr), zap.Stringer("dest", toAddr), zap.Uint32("conn_seed", conn.ConnSeed), zap.Uint32("conn_id_send", conn.connIDSend), zap.Uint32("conn_id_recv", conn.connIDRecv), zap.Uint32("id", id))
+		// conn.logger.Debug("Examining Socket", zap.Stringer("source", conn.addr), zap.Stringer("dest", toAddr), zap.Uint32("conn_seed", conn.ConnSeed), zap.Uint32("conn_id_send", conn.ConnIDSend), zap.Uint32("conn_id_recv", conn.ConnIDRecv), zap.Uint32("id", id))
 		if conn.addr.Port != toAddr.Port {
 			continue
 		}
@@ -3079,7 +3078,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 			continue
 		}
 
-		if flags == stReset && (conn.connIDSend == id || conn.connIDRecv == id) {
+		if flags == stReset && (conn.ConnIDSend == id || conn.ConnIDRecv == id) {
 			conn.logger.Debug("recv RST for existing connection")
 			if conn.userdata == nil || conn.state == csFinSent {
 				conn.state = csDestroy
@@ -3096,7 +3095,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 				conn.callbackTable.OnError(conn.userdata, socketErr)
 			}
 			return true
-		} else if flags != stSyn && conn.connIDRecv == id {
+		} else if flags != stSyn && (conn.ConnIDRecv == id || conn.ConnIDSend == id) {
 			mx.logger.Debug("recv processing")
 			read := mx.processIncoming(conn, buffer, false, currentMS)
 			if conn.userdata != nil {
@@ -3151,12 +3150,18 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	if incomingCB != nil {
 		mx.logger.Debug("Incoming connection", zap.Int8("utp-version", version))
 		cid := ReceConnId(id)
+		// Create a new UTP socket to handle this new connection
 		conn, err := mx.Create(sendToCB, sendToUserdata, toAddr, cid)
 		if err != nil {
 			mx.logger.Error("synchronous connections?", zap.Error(err))
 			return true
 		}
-
+		// Need to track this value to be able to detect duplicate CONNECTs
+		conn.ConnSeed = id
+		// This is value that identifies this connection for them.
+		conn.ConnIDSend = id
+		// This is value that identifies this connection for us.
+		conn.ConnIDRecv = id + 1
 		conn.ackNum = seqNum
 		conn.seqNum = uint16(RandomUint32())
 		conn.fastResendSeqNum = conn.seqNum
@@ -3211,7 +3216,7 @@ func (mx *SocketMultiplexer) HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool
 	id := ph.getConnID()
 
 	for _, conn := range mx.socketMap {
-		if conn.addr.IP.Equal(toAddr.IP) && conn.addr.Port == toAddr.Port && conn.connIDRecv == id {
+		if conn.addr.IP.Equal(toAddr.IP) && conn.addr.Port == toAddr.Port && conn.ConnIDRecv == id {
 			// Don't pass on errors for idle/closed connections
 			if conn.state != csIdle {
 				if conn.userdata == nil || conn.state == csFinSent {
