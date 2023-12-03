@@ -844,7 +844,7 @@ type SocketManager struct {
 }
 
 const (
-	defaultUTPConnBacklogSize = 5
+	defaultUTPConnBacklogSize = 100
 )
 
 func NewSocketManagerWithOptions(network string, localAddr *net.UDPAddr, options ...ConnectOption) (*SocketManager, error) {
