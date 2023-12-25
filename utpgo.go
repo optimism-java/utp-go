@@ -98,9 +98,10 @@ type Conn struct {
 type Listener struct {
 	utpSocket
 
-	acceptChan    <-chan *Conn
-	lock          sync.Mutex
-	incommingConn map[*Conn]uint32
+	acceptChan      <-chan *Conn
+	lock            sync.Mutex
+	incommingConn   map[*Conn]uint32
+	requiringConnId map[uint32]bool
 }
 
 func NewConnIdGenerator() libutp.ConnIdGenerator {
@@ -321,8 +322,9 @@ func listen(s *utpDialState, network string, localAddr *Addr) (*Listener, error)
 			localAddr: udpLocalAddr,
 			manager:   manager,
 		},
-		acceptChan:    manager.acceptChan,
-		incommingConn: make(map[*Conn]uint32),
+		acceptChan:      manager.acceptChan,
+		incommingConn:   make(map[*Conn]uint32),
+		requiringConnId: make(map[uint32]bool),
 	}
 	manager.start()
 	return utpListener, nil
@@ -672,14 +674,14 @@ var _ net.Conn = &Conn{}
 
 // AcceptUTPContext accepts a new µTP connection on a listening socket.
 func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Conn, error) {
-	ticker := time.NewTicker(time.Millisecond * 100)
+	l.recordRequireConnId(connIdSeed)
+	ticker := time.NewTicker(time.Millisecond * 17)
 	for {
-		l.lock.Lock()
-		defer l.lock.Unlock()
 		select {
 		case newConn, ok := <-l.acceptChan:
 			if ok {
-				if connIdSeed == 0 || newConn.baseConn.ConnSeed == connIdSeed {
+				connSeed := newConn.baseConn.ConnSeed
+				if connSeed == connIdSeed || (connIdSeed == 0 && !l.requiringConnId[connSeed]) {
 					return newConn, nil
 				}
 				l.incommingConn[newConn] = newConn.baseConn.ConnSeed
@@ -694,17 +696,46 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Co
 			if len(l.incommingConn) == 0 {
 				continue
 			}
-			for conn, connId := range l.incommingConn {
-				if connIdSeed == 0 || connId == connIdSeed {
-					return conn, nil
-				}
-			}
+			return l.removeAndGetCommingConn(connIdSeed), nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
 }
 
+func (l *Listener) recordRequireConnId(connId uint32) {
+	if connId == 0 {
+		return
+	}
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	l.requiringConnId[connId] = true
+}
+
+func (l *Listener) putInCommingConn(newConn *Conn) {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	l.incommingConn[newConn] = newConn.baseConn.ConnSeed
+}
+
+func (l *Listener) removeAndGetCommingConn(connId uint32) *Conn {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	var result *Conn
+	for conn, connIdSeed := range l.incommingConn {
+		if connId == connIdSeed || (connId == 0 && !l.requiringConnId[connIdSeed]) {
+			result = conn
+			break
+		}
+	}
+	if result != nil {
+		delete(l.incommingConn, result)
+		delete(l.requiringConnId, result.baseConn.ConnSeed)
+	}
+	return result
+}
+
+// AcceptUTPWithConnId accepts a new µTP connection with special connection id on a listening socket.
 func (l *Listener) AcceptUTPWithConnId(connId uint32) (*Conn, error) {
 	return l.AcceptUTPContext(context.Background(), connId)
 }
