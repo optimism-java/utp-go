@@ -25,12 +25,12 @@ import (
 // Buffer for data before it gets to µTP (there is another "send buffer" in
 // the libutp code, but it is for managing flow control window sizes).
 const (
-	readBufferSize  = 200000
-	writeBufferSize = 200000
+	readBufferSize  = 524288
+	writeBufferSize = 524288
 
 	// Make the read buffer larger than advertised, so that surplus bytes can be
 	// handled under certain conditions.
-	receiveBufferMultiplier = 2
+	receiveBufferMultiplier = 4
 )
 
 var noopLogger = zap.NewNop()
