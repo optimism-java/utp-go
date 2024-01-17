@@ -26,11 +26,10 @@ import (
 // the libutp code, but it is for managing flow control window sizes).
 const (
 	readBufferSize  = 524288
-	writeBufferSize = 524288
-
+	writeBufferSize = 1048576
 	// Make the read buffer larger than advertised, so that surplus bytes can be
 	// handled under certain conditions.
-	receiveBufferMultiplier = 4
+	receiveBufferMultiplier = 2
 )
 
 var noopLogger = zap.NewNop()
@@ -203,8 +202,8 @@ func dial(ctx context.Context, s *utpDialState, network string, localAddr, remot
 		connectChan:       make(chan struct{}),
 		closeChan:         make(chan struct{}),
 		baseConnDestroyed: make(chan struct{}),
-		readBuffer:        buffers.NewSyncBuffer(readBufferSize * receiveBufferMultiplier),
-		writeBuffer:       buffers.NewSyncBuffer(writeBufferSize),
+		readBuffer:        buffers.NewSyncBuffer(manager.readBufferSize * receiveBufferMultiplier),
+		writeBuffer:       buffers.NewSyncBuffer(manager.writeBufferSize),
 	}
 	connLogger.Debug("creating outgoing socket")
 	// thread-safe here, because no other goroutines could have a handle to
@@ -225,7 +224,7 @@ func dial(ctx context.Context, s *utpDialState, network string, localAddr, remot
 		OnError:   onErrorCallback,
 	}, utpConn)
 	utpConn.baseConn.SetLogger(connLogger.Named("utp-socket"))
-	utpConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, readBufferSize)
+	utpConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, manager.readBufferSize)
 
 	manager.start()
 
@@ -339,6 +338,8 @@ type utpDialState struct {
 	sm              *SocketManager
 	maxPacketSize   int
 	pr              *PacketRouter
+	readBufferSize  int
+	writeBufferSize int
 }
 
 // ConnectOption is the interface which connection options should implement.
@@ -403,6 +404,14 @@ func WithMaxPacketSize(size int) ConnectOption {
 func WithPacketRouter(pr *PacketRouter) ConnectOption {
 	return func(s *utpDialState) {
 		s.pr = pr
+	}
+}
+
+// WithBufferSize Will set the write buffer size and read buffer size for connection
+func WithBufferSize(readSize int, writeSize int) ConnectOption {
+	return func(s *utpDialState) {
+		s.readBufferSize = readSize
+		s.writeBufferSize = writeSize
 	}
 }
 
@@ -866,12 +875,16 @@ type SocketManager struct {
 	socketErrors     []error
 	socketErrorsLock sync.Mutex
 
+	readBufferSize  int
+	writeBufferSize int
+
 	pollInterval time.Duration
 
 	startOnce  sync.Once
 	localAddr  *net.UDPAddr
 	remoteAddr *net.UDPAddr
-	isShared   bool
+	// isShared flag if this SocketManager is share with other. When using WithSocketManager option, it will be set true.
+	isShared bool
 }
 
 const (
@@ -892,6 +905,9 @@ func newSocketManager(s *utpDialState, network string, localAddr, remoteAddr *ne
 	if s.sm != nil {
 		s.sm.isShared = true
 		return s.sm, nil
+	}
+	if s.writeBufferSize < 0 || s.readBufferSize < 0 {
+		return nil, errors.New("Buffer size is negative")
 	}
 	switch network {
 	case "utp", "utp4", "utp6":
@@ -935,6 +951,12 @@ func newSocketManager(s *utpDialState, network string, localAddr, remoteAddr *ne
 		localAddr:    localAddr,
 		remoteAddr:   remoteAddr,
 		isShared:     false,
+	}
+	if s.readBufferSize == 0 {
+		sm.readBufferSize = readBufferSize
+	}
+	if s.writeBufferSize == 0 {
+		sm.writeBufferSize = writeBufferSize
 	}
 	sm.pr.sm = sm
 	return sm, nil
@@ -1098,8 +1120,8 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		baseConn:          newBaseConn,
 		closeChan:         make(chan struct{}),
 		baseConnDestroyed: make(chan struct{}),
-		readBuffer:        buffers.NewSyncBuffer(readBufferSize * receiveBufferMultiplier),
-		writeBuffer:       buffers.NewSyncBuffer(writeBufferSize),
+		readBuffer:        buffers.NewSyncBuffer(sm.readBufferSize * receiveBufferMultiplier),
+		writeBuffer:       buffers.NewSyncBuffer(sm.writeBufferSize),
 	}
 	newBaseConn.SetCallbacks(&libutp.CallbackTable{
 		OnRead:    onReadCallback,
@@ -1109,7 +1131,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		OnError:   onErrorCallback,
 	}, newUTPConn)
 	sm.logger.Info("accepted new connection", zap.Stringer("remote-addr", newUTPConn.RemoteAddr()))
-	newUTPConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, readBufferSize)
+	newUTPConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, sm.readBufferSize)
 	select {
 	case sm.acceptChan <- newUTPConn:
 		// it's the SocketManager's problem now
