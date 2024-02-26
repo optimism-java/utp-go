@@ -3013,12 +3013,12 @@ func (s *Socket) Connect() {
 	// SYN packets are special, and have the receive ID in the connID field,
 	// instead of ConnIDSend.
 	pa.setConnID(s.ConnIDRecv)
-	pa.setExt(2)
+	pa.setExt(0)
 	pa.setPacketType(stSyn)
 	pa.setWindowSize(s.lastReceiveWindow)
 	pa.setSequenceNumber(s.seqNum)
-	pa.setExtNext(0)
-	pa.setExtLen(8)
+	//pa.setExtNext(0)
+	//pa.setExtLen(8)
 
 	// s.logger.Debug("Sending connect", zap.Stringer("address", s.addr), zap.Uint32("conn_seed", ConnSeed))
 
@@ -3172,7 +3172,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		read := mx.processIncoming(conn, buffer, true, currentMS)
 
 		conn.logger.Debug("recv send connect ACK")
-		conn.sendAck(true, currentMS)
+		conn.sendAck(false, currentMS)
 
 		incomingCB(sendToUserdata, conn)
 
