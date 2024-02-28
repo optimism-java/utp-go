@@ -689,17 +689,9 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Co
 		select {
 		case newConn, ok := <-l.acceptChan:
 			if ok {
-				connSeed := newConn.baseConn.ConnSeed
-				if connSeed == connIdSeed || (connIdSeed == 0 && !l.requiringConnId[connSeed]) {
-					return newConn, nil
+				if conn := l.filterConn(newConn, connIdSeed); conn != nil {
+					return conn, nil
 				}
-				l.lock.Lock()
-				if _, exist := l.incommingConn[newConn]; exist {
-					l.lock.Unlock()
-					continue
-				}
-				l.incommingConn[newConn] = newConn.baseConn.ConnSeed
-				l.lock.Unlock()
 				continue
 			}
 			err := l.encounteredError
@@ -708,9 +700,6 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Co
 			}
 			return nil, err
 		case <-ticker.C:
-			if len(l.incommingConn) == 0 {
-				continue
-			}
 			if conn := l.removeAndGetCommingConn(connIdSeed); conn != nil {
 				return conn, nil
 			}
@@ -735,9 +724,25 @@ func (l *Listener) putInCommingConn(newConn *Conn) {
 	l.incommingConn[newConn] = newConn.baseConn.ConnSeed
 }
 
+func (l *Listener) filterConn(newConn *Conn, connIdSeed uint32) *Conn {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	connSeed := newConn.baseConn.ConnSeed
+	if connSeed == connIdSeed || (connIdSeed == 0 && !l.requiringConnId[connSeed]) {
+		return newConn
+	}
+	if _, exist := l.incommingConn[newConn]; !exist {
+		l.incommingConn[newConn] = newConn.baseConn.ConnSeed
+	}
+	return nil
+}
+
 func (l *Listener) removeAndGetCommingConn(connId uint32) *Conn {
 	l.lock.Lock()
 	defer l.lock.Unlock()
+	if len(l.incommingConn) == 0 {
+		return nil
+	}
 	var result *Conn
 	for conn, connIdSeed := range l.incommingConn {
 		if connId == connIdSeed || (connId == 0 && !l.requiringConnId[connIdSeed]) {
