@@ -693,7 +693,13 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Co
 				if connSeed == connIdSeed || (connIdSeed == 0 && !l.requiringConnId[connSeed]) {
 					return newConn, nil
 				}
+				l.lock.Lock()
+				if _, exist := l.incommingConn[newConn]; exist {
+					l.lock.Unlock()
+					continue
+				}
 				l.incommingConn[newConn] = newConn.baseConn.ConnSeed
+				l.lock.Unlock()
 				continue
 			}
 			err := l.encounteredError
@@ -705,7 +711,9 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Co
 			if len(l.incommingConn) == 0 {
 				continue
 			}
-			return l.removeAndGetCommingConn(connIdSeed), nil
+			if conn := l.removeAndGetCommingConn(connIdSeed); conn != nil {
+				return conn, nil
+			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
