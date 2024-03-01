@@ -2643,7 +2643,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	if seqNum == 0 {
 		count := packetEnd - data
 		if count > 0 && conn.state != csFinSent {
-			conn.logger.Debug("Got Data", zap.Int("len", count), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
+			mx.logger.Debug("Got Data", zap.Uint16("seq_nr", conn.seqNum), zap.Uint32("connSendId", conn.ConnIDSend), zap.Uint32("connRecvId", conn.ConnIDRecv), zap.Int("len", count))
 			// Post bytes to the upper layer
 			conn.callbackTable.OnRead(conn.userdata, packet[data:data+count])
 		}
