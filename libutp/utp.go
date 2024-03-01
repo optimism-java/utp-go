@@ -2688,6 +2688,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 			conn.inbuf.put(int(conn.ackNum)+1, nil)
 			if len(b) > 0 && conn.state != csFinSent {
 				// Pass the bytes to the upper layer
+				mx.logger.Debug("Got Data", zap.Uint16("seq_nr", conn.seqNum), zap.Uint32("connSendId", conn.ConnIDSend), zap.Uint32("connRecvId", conn.ConnIDRecv), zap.Int("len", len(b)))
 				conn.callbackTable.OnRead(conn.userdata, b)
 			}
 			conn.ackNum++
