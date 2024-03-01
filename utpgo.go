@@ -25,7 +25,7 @@ import (
 // Buffer for data before it gets to µTP (there is another "send buffer" in
 // the libutp code, but it is for managing flow control window sizes).
 const (
-	readBufferSize  = 524288
+	readBufferSize  = 1048576
 	writeBufferSize = 1048576
 	// Make the read buffer larger than advertised, so that surplus bytes can be
 	// handled under certain conditions.
