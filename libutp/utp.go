@@ -2420,7 +2420,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 			packet[selackPtr:selackPtr+selackLen], &minRTT)
 	}
 
-	conn.logger.Debug("ack state", zap.Uint16("acks", acks), zap.Int("acked_bytes", ackedBytes), zap.Uint16("seq_nr", conn.seqNum), zap.Int("cur_window", conn.curWindow), zap.Uint16("cur_window_packets", conn.curWindowPackets), zap.Uint16("relative_seqnr", seqNum), zap.Int("max_window", conn.maxWindow), zap.Int64("min_rtt", minRTT/1000), zap.Uint("rtt", conn.rtt))
+	mx.logger.Debug("ack state", zap.Uint16("acks", acks), zap.Int("acked_bytes", ackedBytes), zap.Uint16("seq_nr", conn.seqNum), zap.Int("cur_window", conn.curWindow), zap.Uint16("cur_window_packets", conn.curWindowPackets), zap.Uint16("relative_seqnr", seqNum), zap.Int("max_window", conn.maxWindow), zap.Int64("min_rtt", minRTT/1000), zap.Uint("rtt", conn.rtt))
 
 	packetTime := p.getPacketTime()
 	conn.lastMeasuredDelay = currentMS
@@ -2708,7 +2708,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		// is lower than the sequence number of the packet we just received
 		// something is wrong.
 		if conn.gotFin && pkSeqNum > conn.eofPacket {
-			conn.logger.Debug("Got an invalid packet sequence number, past EOF", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
+			mx.logger.Debug("Got an invalid packet sequence number, past EOF", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
 			return 0
 		}
 
@@ -2716,7 +2716,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		// one, just drop it. We can't allocate buffer space in
 		// the inbuf entirely based on untrusted input
 		if seqNum > 0x3ff {
-			conn.logger.Debug("Got an invalid packet sequence number, too far off", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
+			mx.logger.Debug("Got an invalid packet sequence number, too far off", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
 			return 0
 		}
 
