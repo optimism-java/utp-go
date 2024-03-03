@@ -2283,7 +2283,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	pkAckNum := p.getAckNumber()
 	pkFlags := p.getPacketType()
 
-	conn.logger.Debug("Got incoming", zap.Stringer("flags", pkFlags), zap.Uint16("seq_nr", pkSeqNum), zap.Uint16("ack_nr", pkAckNum), zap.Stringer("state", conn.state), zap.Int8("version", conn.version), zap.Uint64("timestamp", p.getPacketTime()), zap.Uint32("reply_micro", p.getReplyMicro()))
+	mx.logger.Debug("Got incoming", zap.Stringer("flags", pkFlags), zap.Uint16("seq_nr", pkSeqNum), zap.Uint16("ack_nr", pkAckNum), zap.Stringer("state", conn.state), zap.Int8("version", conn.version), zap.Uint64("timestamp", p.getPacketTime()), zap.Uint32("reply_micro", p.getReplyMicro()))
 	if pkFlags >= stNumStates {
 		conn.logger.Debug("Invalid package type", zap.Stringer("flags", pkFlags))
 		return 0
@@ -2749,7 +2749,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		conn.inbuf.put(int(pkSeqNum), mem)
 		conn.reorderCount++
 
-		conn.logger.Debug("Got out of order data", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
+		mx.logger.Debug("Got out of order data", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
 
 		// Setup so the partial ACK message will get sent immediately.
 		conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, 1)
