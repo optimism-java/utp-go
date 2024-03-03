@@ -2283,7 +2283,15 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	pkAckNum := p.getAckNumber()
 	pkFlags := p.getPacketType()
 
-	mx.logger.Debug("Got incoming", zap.Stringer("flags", pkFlags), zap.Uint16("pk_seq_nr", pkSeqNum), zap.Uint16("pk_ack_nr", pkAckNum), zap.Stringer("state", conn.state), zap.Int8("version", conn.version), zap.Uint64("timestamp", p.getPacketTime()), zap.Uint32("reply_micro", p.getReplyMicro()))
+	mx.logger.Debug("Got incoming",
+		zap.Stringer("pk_flags", pkFlags),
+		zap.Uint16("pk_seq_nr", pkSeqNum),
+		zap.Uint16("pk_ack_nr", pkAckNum),
+		zap.Stringer("conn_state", conn.state),
+		zap.Int8("conn_version", conn.version),
+		zap.Uint16("conn_ack_num", conn.ackNum),
+		zap.Uint64("pk_timestamp", p.getPacketTime()),
+		zap.Uint32("pk_reply_micro", p.getReplyMicro()))
 	if pkFlags >= stNumStates {
 		conn.logger.Debug("Invalid package type", zap.Stringer("flags", pkFlags))
 		return 0
@@ -2357,7 +2365,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	// current. Subtracting 1 makes 0 mean "this is the next
 	// expected packet".
 	seqNum := (pkSeqNum - conn.ackNum - 1) & seqNumberMask
-
+	mx.logger.Debug("seq_num = (pk_seq_num - conn_ack_num - 1) & 0xFFFF", zap.Uint16("seq_num", seqNum))
 	// Getting an invalid sequence number?
 	if seqNum >= reorderBufferMaxSize {
 		if seqNum >= (seqNumberMask+1)-reorderBufferMaxSize && pkFlags != stState {
@@ -2643,7 +2651,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	if seqNum == 0 {
 		count := packetEnd - data
 		if count > 0 && conn.state != csFinSent {
-			mx.logger.Debug("Got Data", zap.Uint16("seq_nr", conn.seqNum), zap.Uint32("connSendId", conn.ConnIDSend), zap.Uint32("connRecvId", conn.ConnIDRecv), zap.Int("len", count))
+			mx.logger.Debug("Got Data", zap.Uint16("seq_num", seqNum), zap.Uint16("seq_nr", conn.seqNum), zap.Uint32("connSendId", conn.ConnIDSend), zap.Uint32("connRecvId", conn.ConnIDRecv), zap.Int("len", count))
 			// Post bytes to the upper layer
 			conn.callbackTable.OnRead(conn.userdata, packet[data:data+count])
 		}
