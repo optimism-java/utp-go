@@ -2283,7 +2283,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	pkAckNum := p.getAckNumber()
 	pkFlags := p.getPacketType()
 
-	mx.logger.Debug("Got incoming", zap.Stringer("flags", pkFlags), zap.Uint16("seq_nr", pkSeqNum), zap.Uint16("ack_nr", pkAckNum), zap.Stringer("state", conn.state), zap.Int8("version", conn.version), zap.Uint64("timestamp", p.getPacketTime()), zap.Uint32("reply_micro", p.getReplyMicro()))
+	mx.logger.Debug("Got incoming", zap.Stringer("flags", pkFlags), zap.Uint16("pk_seq_nr", pkSeqNum), zap.Uint16("pk_ack_nr", pkAckNum), zap.Stringer("state", conn.state), zap.Int8("version", conn.version), zap.Uint64("timestamp", p.getPacketTime()), zap.Uint32("reply_micro", p.getReplyMicro()))
 	if pkFlags >= stNumStates {
 		conn.logger.Debug("Invalid package type", zap.Stringer("flags", pkFlags))
 		return 0
@@ -2303,7 +2303,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	// Data pointer
 	data := conn.getHeaderSize()
 	if conn.getHeaderSize() > packetEnd {
-		conn.logger.Debug("Invalid packet size (less than header size)")
+		mx.logger.Debug("Invalid packet size (less than header size)")
 		return 0
 	}
 	// Skip the extension headers
@@ -2314,7 +2314,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 			data += 2
 
 			if (packetEnd-data) < 0 || (packetEnd-data) < int(packet[data-1]) {
-				conn.logger.Debug("Invalid len of extensions")
+				mx.logger.Debug("Invalid len of extensions")
 				return 0
 			}
 
@@ -2323,11 +2323,11 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 				selackPtr = data
 			case 2: // extension bits
 				if packet[data-1] != 8 {
-					conn.logger.Debug("Invalid len of extension bits header")
+					mx.logger.Debug("Invalid len of extension bits header")
 					return 0
 				}
 				copy(conn.extensions[:], packet[data:data+8])
-				conn.logger.Debug("got extension bits", zap.ByteString("bits", conn.extensions[:]))
+				mx.logger.Debug("got extension bits", zap.ByteString("bits", conn.extensions[:]))
 			}
 			extension = int8(packet[data-2])
 			data += int(packet[data-1])
@@ -2363,7 +2363,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		if seqNum >= (seqNumberMask+1)-reorderBufferMaxSize && pkFlags != stState {
 			conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, delayedAckTimeThreshold)
 		}
-		conn.logger.Debug("Got old Packet/Ack!", zap.Uint16("pkSeqNum", pkSeqNum), zap.Uint16("ackNum", conn.ackNum), zap.Uint16("seqNum", seqNum))
+		mx.logger.Debug("Got old Packet/Ack!", zap.Uint16("pkSeqNum", pkSeqNum), zap.Uint16("ackNum", conn.ackNum), zap.Uint16("seqNum", seqNum))
 		return 0
 	}
 
@@ -2526,7 +2526,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 			conn.fastResendSeqNum = pkAckNum + 1
 		}
 
-		conn.logger.Debug("fast_resend update", zap.Uint16("fast_resend_seq_nr", conn.fastResendSeqNum))
+		mx.logger.Debug("fast_resend update", zap.Uint16("fast_resend_seq_nr", conn.fastResendSeqNum))
 
 		for i := uint16(0); i < acks; i++ {
 			ackStatus := conn.ackPacket(conn.seqNum-conn.curWindowPackets, currentMS)
@@ -2574,7 +2574,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 
 		// Fast timeout-retry
 		if conn.fastTimeout {
-			conn.logger.Debug("Fast timeout?", zap.Int("curWindow", conn.curWindow), zap.Uint16("seqNum", conn.seqNum), zap.Uint16("timeoutSeqNum", conn.timeoutSeqNum))
+			mx.logger.Debug("Fast timeout?", zap.Int("curWindow", conn.curWindow), zap.Uint16("seqNum", conn.seqNum), zap.Uint16("timeoutSeqNum", conn.timeoutSeqNum))
 			// if the fastResendSeqNum is not pointing to the oldest outstanding packet, it suggests that we've already
 			// resent the packet that timed out, and we should leave the fast-timeout mode.
 			if ((conn.seqNum - conn.curWindowPackets) & ackNumberMask) != conn.fastResendSeqNum {
@@ -2584,7 +2584,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 				// to not allow another fast resend on it again
 				pkt := conn.outbuf.get(int(conn.seqNum) - int(conn.curWindowPackets))
 				if pkt != nil && pkt.transmissions > 0 {
-					conn.logger.Debug("Packet fast timeout-retry", zap.Uint16("seqNum", conn.seqNum), zap.Uint16("curWindowPackets", conn.curWindowPackets))
+					mx.logger.Debug("Packet fast timeout-retry", zap.Uint16("seqNum", conn.seqNum), zap.Uint16("curWindowPackets", conn.curWindowPackets))
 					conn.stats.fastTransmitted()
 					conn.fastResendSeqNum++
 					conn.sendPacket(pkt, currentMS)
@@ -2602,13 +2602,13 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 	// this invariant should always be true
 	dumbAssert(conn.curWindowPackets == 0 || conn.outbuf.get(int(conn.seqNum)-int(conn.curWindowPackets)) != nil)
 
-	conn.logger.Debug("selacks processed", zap.Uint16("acks", acks), zap.Int("acked_bytes", ackedBytes), zap.Uint16("seq_nr", conn.seqNum), zap.Int("cur_window", conn.curWindow), zap.Uint16("cur_window_packets", conn.curWindowPackets), zap.Int32("quota", conn.sendQuota/100))
+	mx.logger.Debug("selacks processed", zap.Uint16("acks", acks), zap.Int("acked_bytes", ackedBytes), zap.Uint16("seq_nr", conn.seqNum), zap.Int("cur_window", conn.curWindow), zap.Uint16("cur_window_packets", conn.curWindowPackets), zap.Int32("quota", conn.sendQuota/100))
 
 	// In case the ack dropped the current window below
 	// the maxWindow size, Mark the socket as writable
 	if conn.state == csConnectedFull && conn.isWritable(conn.GetPacketSize(), currentMS) {
 		conn.state = csConnected
-		conn.logger.Debug("Socket writable", zap.Int("max_window", conn.maxWindow), zap.Int("cur_window", conn.curWindow), zap.Int32("quota", conn.sendQuota/100), zap.Int("packet_size", conn.GetPacketSize()))
+		mx.logger.Debug("Socket writable", zap.Int("max_window", conn.maxWindow), zap.Int("cur_window", conn.curWindow), zap.Int32("quota", conn.sendQuota/100), zap.Int("packet_size", conn.GetPacketSize()))
 		conn.callbackTable.OnState(conn.userdata, StateWritable)
 	}
 
@@ -2626,7 +2626,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 
 	// Is this a finalize packet?
 	if pkFlags == stFin && !conn.gotFin {
-		conn.logger.Debug("Got FIN", zap.Uint16("eof_pkt", pkSeqNum))
+		mx.logger.Debug("Got FIN", zap.Uint16("eof_pkt", pkSeqNum))
 		conn.gotFin = true
 		conn.eofPacket = pkSeqNum
 		// at this point, it is possible for the
@@ -2658,7 +2658,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 					conn.state = csGotFin
 					conn.rtoTimeout = uint(currentMS) + minUint(conn.rto*3, 60)
 
-					conn.logger.Debug("Posting EOF")
+					mx.logger.Debug("Posting EOF")
 					conn.callbackTable.OnState(conn.userdata, StateEOF)
 				}
 
@@ -2757,7 +2757,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 
 	// If ackTime or bytesSinceAck indicate that we need to send and ack, send one
 	// here instead of waiting for the timer to trigger
-	conn.logger.Debug("check if ack necessary", zap.Int("bytes_since_ack", conn.bytesSinceAck), zap.Uint32("ack_time", currentMS-conn.ackTime))
+	mx.logger.Debug("check if ack necessary", zap.Int("bytes_since_ack", conn.bytesSinceAck), zap.Uint32("ack_time", currentMS-conn.ackTime))
 	if conn.state == csConnected || conn.state == csConnectedFull {
 		if conn.bytesSinceAck > delayedAckByteThreshold ||
 			(int)(currentMS-conn.ackTime) >= 0 {
@@ -2779,7 +2779,7 @@ func detectVersion(packetBytes []byte) int8 {
 }
 
 func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
-	conn.logger.Debug("Killing socket")
+	mx.logger.Debug("Killing socket")
 
 	mx.mapLock.Lock()
 	defer mx.mapLock.Unlock()
@@ -3067,11 +3067,17 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	}
 
 	id := ph.getConnID()
-	mx.logger.Debug("recv", zap.Int("len", len(buffer)), zap.Uint32("id", id), zap.Uint16("seq_nr", ph.getSequenceNumber()), zap.Uint16("ack_nr", ph.getAckNumber()), zap.Any("src_addr", toAddr.String()))
+	mx.logger.Debug("recv",
+		zap.Int("len", len(buffer)),
+		zap.Uint32("id", id),
+		zap.Uint16("seq_nr", ph.getSequenceNumber()),
+		zap.Uint16("ack_nr", ph.getAckNumber()),
+		zap.Any("src_addr", toAddr.String()),
+	)
 
 	flags := ph.getPacketType()
 	for _, conn := range mx.socketMap {
-		// conn.logger.Debug("Examining Socket", zap.Stringer("source", conn.addr), zap.Stringer("dest", toAddr), zap.Uint32("conn_seed", conn.ConnSeed), zap.Uint32("conn_id_send", conn.ConnIDSend), zap.Uint32("conn_id_recv", conn.ConnIDRecv), zap.Uint32("id", id))
+		// mx.logger.Debug("Examining Socket", zap.Stringer("source", conn.addr), zap.Stringer("dest", toAddr), zap.Uint32("conn_seed", conn.ConnSeed), zap.Uint32("conn_id_send", conn.ConnIDSend), zap.Uint32("conn_id_recv", conn.ConnIDRecv), zap.Uint32("id", id))
 		if conn.addr.Port != toAddr.Port {
 			continue
 		}
@@ -3080,7 +3086,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		}
 
 		if flags == stReset && (conn.ConnIDSend == id || conn.ConnIDRecv == id) {
-			conn.logger.Debug("recv RST for existing connection")
+			mx.logger.Debug("recv RST for existing connection")
 			if conn.userdata == nil || conn.state == csFinSent {
 				conn.state = csDestroy
 			} else {
@@ -3172,7 +3178,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 
 		read := mx.processIncoming(conn, buffer, true, currentMS)
 
-		conn.logger.Debug("recv send connect ACK")
+		mx.logger.Debug("recv send connect ACK")
 		conn.sendAck(false, currentMS)
 
 		incomingCB(sendToUserdata, conn)
@@ -3221,7 +3227,7 @@ func (mx *SocketMultiplexer) HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool
 			// Don't pass on errors for idle/closed connections
 			if conn.state != csIdle {
 				if conn.userdata == nil || conn.state == csFinSent {
-					conn.logger.Debug("icmp packet causing socket destruction")
+					mx.logger.Debug("icmp packet causing socket destruction")
 					conn.state = csDestroy
 				} else {
 					conn.state = csReset
@@ -3231,7 +3237,7 @@ func (mx *SocketMultiplexer) HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool
 					if conn.state == csSynSent {
 						socketErr = syscall.ECONNREFUSED
 					}
-					conn.logger.Debug("icmp packet causing error on socket", zap.Int("errno", int(socketErr)), zap.Error(socketErr))
+					mx.logger.Debug("icmp packet causing error on socket", zap.Int("errno", int(socketErr)), zap.Error(socketErr))
 					conn.callbackTable.OnError(conn.userdata, socketErr)
 				}
 			}
@@ -3349,7 +3355,7 @@ func (mx *SocketMultiplexer) CheckTimeouts() {
 
 		// Check if the object was deleted
 		if conn.state == csDestroy {
-			conn.logger.Debug("Destroying")
+			mx.logger.Debug("Destroying")
 			mx.removeFromTracking(conn)
 		}
 	}
