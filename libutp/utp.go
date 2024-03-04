@@ -2346,13 +2346,11 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		}
 	}
 
-	if conn.state == csSynSent || conn.state == csConnected {
+	if conn.state == csSynSent && pkFlags == stState {
 		// if this is a syn-ack, initialize our ackNum
 		// to match the sequence number we got from
 		// the other end
-		if initialSeqNum := (pkSeqNum - 1) & seqNumberMask; conn.ackNum == 0 || conn.ackNum > initialSeqNum {
-			conn.ackNum = initialSeqNum
-		}
+		conn.ackNum = (pkSeqNum - 1) & seqNumberMask
 	}
 
 	currentMS = mx.getCurrentMS()
