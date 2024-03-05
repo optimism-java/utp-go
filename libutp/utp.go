@@ -82,8 +82,8 @@ const (
 	// 29 seconds determined from measuring many home NAT devices.
 	keepaliveInterval = 29000
 
-	seqNumberMask = 0xFFFF
-	ackNumberMask = 0xFFFF
+	seqNumberMask = 0xFFFF / 2
+	ackNumberMask = 0xFFFF / 2
 )
 
 func divRoundUp(num, denom uint32) uint32 {
