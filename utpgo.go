@@ -964,16 +964,20 @@ func newSocketManager(s *utpDialState, network string, localAddr, remoteAddr *ne
 		}
 	}
 	var localAddrStr fmt.Stringer
+	mxLogger := s.logger.Named("mx")
+	smLogger := s.logger.Named("manager")
 	if s.pr.udpSocket != nil {
 		localAddrStr = s.pr.udpSocket.LocalAddr()
+		mxLogger.With(zap.Stringer("local-addr", localAddrStr))
+		smLogger.With(zap.Stringer("local-addr", localAddrStr))
 	}
 
 	// thread-safe here; don't need baseConnLock
-	mx := libutp.NewSocketMultiplexer(s.logger.Named("mx").With(zap.Stringer("local-addr", localAddrStr)), nil, s.maxPacketSize)
+	mx := libutp.NewSocketMultiplexer(mxLogger, nil, s.maxPacketSize)
 
 	sm := &SocketManager{
 		mx:           mx,
-		logger:       s.logger.Named("manager").With(zap.Stringer("local-addr", localAddrStr)),
+		logger:       smLogger,
 		pr:           s.pr,
 		refCount:     1,
 		closeErr:     make(chan error),

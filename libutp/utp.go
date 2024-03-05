@@ -2346,7 +2346,8 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		}
 	}
 
-	if conn.state == csSynSent && pkFlags == stState {
+	//if conn.state == csSynSent && pkFlags == stState {
+	if conn.state == csSynSent {
 		// if this is a syn-ack, initialize our ackNum
 		// to match the sequence number we got from
 		// the other end
