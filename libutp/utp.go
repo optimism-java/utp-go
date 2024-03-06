@@ -2788,19 +2788,29 @@ func detectVersion(packetBytes []byte) int8 {
 }
 
 func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
-	mx.logger.Debug("Killing socket")
-
 	mx.mapLock.Lock()
 	defer mx.mapLock.Unlock()
-	foundConn, ok := mx.socketMap[fmt.Sprintf("%s_%d_%d", conn.addrString, conn.ConnIDSend, conn.ConnIDRecv)]
-	if ok {
+	connKey := fmt.Sprintf("%s_%d_%d", conn.addrString, conn.ConnIDSend, conn.ConnIDRecv)
+
+	if foundConn, ok := mx.socketMap[connKey]; ok {
+		mx.logger.Debug("Killing socket",
+			zap.Uint32("conn_send_id", conn.ConnIDSend),
+			zap.Uint32("conn_recv_id", conn.ConnIDRecv),
+			zap.String("addr", conn.addrString),
+			zap.Uint16("conn_ack", conn.ackNum),
+			zap.Uint16("conn_seq", conn.seqNum))
 		dumbAssert(foundConn == conn)
 		delete(mx.socketMap, fmt.Sprintf("%s_%d_%d", conn.addrString, conn.ConnIDSend, conn.ConnIDRecv))
-	}
 
-	if ok {
 		conn.callbackTable.OnState(conn.userdata, StateDestroying)
 		conn.SetCallbacks(nil, nil)
+	} else {
+		mx.logger.Debug("Socket not found",
+			zap.Uint32("conn_send_id", conn.ConnIDSend),
+			zap.Uint32("conn_recv_id", conn.ConnIDRecv),
+			zap.String("addr", conn.addrString),
+			zap.Uint16("conn_ack", conn.ackNum),
+			zap.Uint16("conn_seq", conn.seqNum))
 	}
 }
 
@@ -3346,10 +3356,7 @@ func (mx *SocketMultiplexer) CheckTimeouts() {
 		}
 	}
 
-	socketList := make([]*Socket, 0, len(mx.socketMap))
-	for _, conn := range mx.socketMap {
-		socketList = append(socketList, conn)
-	}
+	socketList := mx.getSocketList()
 	for _, conn := range socketList {
 		conn.checkTimeouts(currentMS)
 
@@ -3368,6 +3375,16 @@ func (mx *SocketMultiplexer) CheckTimeouts() {
 			mx.removeFromTracking(conn)
 		}
 	}
+}
+
+func (mx *SocketMultiplexer) getSocketList() []*Socket {
+	mx.mapLock.Lock()
+	defer mx.mapLock.Unlock()
+	socketList := make([]*Socket, 0, len(mx.socketMap))
+	for _, conn := range mx.socketMap {
+		socketList = append(socketList, conn)
+	}
+	return socketList
 }
 
 func (mx *SocketMultiplexer) getCurrentMS() uint32 {
