@@ -1460,10 +1460,10 @@ func (s *Socket) sendAck(synack bool, currentMS uint32) {
 }
 
 func (s *Socket) sendKeepAlive(currentMS uint32) {
-	s.ackNum--
-	s.logger.Debug("Sending KeepAlive ACK", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.ConnIDSend))
-	s.sendAck(false, currentMS)
-	s.ackNum++
+	//s.ackNum--
+	//s.logger.Debug("Sending KeepAlive ACK", zap.Uint16("ack_nr", s.ackNum), zap.Uint32("id", s.ConnIDSend))
+	//s.sendAck(false, currentMS)
+	//s.ackNum++
 }
 
 func sendRST(logger *zap.Logger, sendToProc PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr, connIDSend uint32, ackNum uint16, seqNum uint16, version int8) {
