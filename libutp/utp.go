@@ -1728,7 +1728,18 @@ func (s *Socket) checkTimeouts(currentMS uint32) {
 	// this invariant should always be true
 	dumbAssert(s.curWindowPackets == 0 || s.outbuf.get(int(s.seqNum)-int(s.curWindowPackets)) != nil)
 
-	s.logger.Debug("CheckTimeouts", zap.Int("timeout", int(s.rtoTimeout)-int(currentMS)), zap.Int("max_window", s.maxWindow), zap.Int("cur_window", s.curWindow), zap.Int32("quota", s.sendQuota/100), zap.Stringer("state", s.state), zap.Uint16("cur_window_packets", s.curWindowPackets), zap.Int("bytes_since_ack", s.bytesSinceAck), zap.Uint32("ack_time", currentMS-s.ackTime))
+	s.logger.Debug("CheckTimeouts",
+		zap.Uint32("conn_send_id", s.ConnIDSend),
+		zap.Uint32("conn_recv_id", s.ConnIDRecv),
+		zap.Uint16("conn_ack_num", s.ackNum),
+		zap.Int("timeout", int(s.rtoTimeout)-int(currentMS)),
+		zap.Int("max_window", s.maxWindow),
+		zap.Int("cur_window", s.curWindow),
+		zap.Int32("quota", s.sendQuota/100),
+		zap.Stringer("state", s.state),
+		zap.Uint16("cur_window_packets", s.curWindowPackets),
+		zap.Int("bytes_since_ack", s.bytesSinceAck),
+		zap.Uint32("ack_time", currentMS-s.ackTime))
 
 	s.updateSendQuota(currentMS)
 	s.flushPackets(currentMS)
@@ -3370,7 +3381,7 @@ func (mx *SocketMultiplexer) CheckTimeouts() {
 		}
 
 		// Check if the object was deleted
-		if conn.state == csDestroy {
+		if conn.state == csDestroy || conn.state == csReset {
 			mx.logger.Debug("Destroying")
 			mx.removeFromTracking(conn)
 		}
