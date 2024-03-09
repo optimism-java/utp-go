@@ -3106,16 +3106,11 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	)
 
 	flags := ph.getPacketType()
-	for _, conn := range mx.socketMap {
-		// mx.logger.Debug("Examining Socket", zap.Stringer("source", conn.addr), zap.Stringer("dest", toAddr), zap.Uint32("conn_seed", conn.ConnSeed), zap.Uint32("conn_id_send", conn.ConnIDSend), zap.Uint32("conn_id_recv", conn.ConnIDRecv), zap.Uint32("id", id))
-		if conn.addr.Port != toAddr.Port {
-			continue
-		}
-		if !conn.addr.IP.Equal(toAddr.IP) {
-			continue
-		}
-
-		if flags == stReset && (conn.ConnIDSend == id || conn.ConnIDRecv == id) {
+	socketList := mx.filterSocket(toAddr, func(conn *Socket) bool {
+		return conn.ConnIDRecv == id || conn.ConnIDSend == id
+	})
+	for _, conn := range socketList {
+		if flags == stReset {
 			mx.logger.Debug("recv RST for existing connection")
 			if conn.userdata == nil || conn.state == csFinSent {
 				conn.state = csDestroy
@@ -3132,7 +3127,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 				conn.callbackTable.OnError(conn.userdata, socketErr)
 			}
 			return true
-		} else if flags != stSyn && (conn.ConnIDRecv == id || conn.ConnIDSend == id) {
+		} else if flags != stSyn {
 			mx.logger.Debug("recv processing")
 			read := mx.processIncoming(conn, buffer, false, currentMS)
 			if conn.userdata != nil {
@@ -3252,27 +3247,29 @@ func (mx *SocketMultiplexer) HandleICMP(buffer []byte, toAddr *net.UDPAddr) bool
 	}
 	id := ph.getConnID()
 
-	for _, conn := range mx.socketMap {
-		if conn.addr.IP.Equal(toAddr.IP) && conn.addr.Port == toAddr.Port && conn.ConnIDRecv == id {
-			// Don't pass on errors for idle/closed connections
-			if conn.state != csIdle {
-				if conn.userdata == nil || conn.state == csFinSent {
-					mx.logger.Debug("icmp packet causing socket destruction")
-					conn.state = csDestroy
-				} else {
-					conn.state = csReset
-				}
-				if conn.userdata != nil {
-					socketErr := syscall.ECONNRESET
-					if conn.state == csSynSent {
-						socketErr = syscall.ECONNREFUSED
-					}
-					mx.logger.Debug("icmp packet causing error on socket", zap.Int("errno", int(socketErr)), zap.Error(socketErr))
-					conn.callbackTable.OnError(conn.userdata, socketErr)
-				}
+	sockets := mx.filterSocket(toAddr, func(condition *Socket) bool {
+		return condition.ConnIDRecv == id
+	})
+
+	for _, conn := range sockets {
+		// Don't pass on errors for idle/closed connections
+		if conn.state != csIdle {
+			if conn.userdata == nil || conn.state == csFinSent {
+				mx.logger.Debug("icmp packet causing socket destruction")
+				conn.state = csDestroy
+			} else {
+				conn.state = csReset
 			}
-			return true
+			if conn.userdata != nil {
+				socketErr := syscall.ECONNRESET
+				if conn.state == csSynSent {
+					socketErr = syscall.ECONNREFUSED
+				}
+				mx.logger.Debug("icmp packet causing error on socket", zap.Int("errno", int(socketErr)), zap.Error(socketErr))
+				conn.callbackTable.OnError(conn.userdata, socketErr)
+			}
 		}
+		return true
 	}
 	return false
 }
@@ -3386,6 +3383,27 @@ func (mx *SocketMultiplexer) CheckTimeouts() {
 			mx.removeFromTracking(conn)
 		}
 	}
+}
+
+type extensionConfident func(conn *Socket) bool
+
+func (mx *SocketMultiplexer) filterSocket(toAddr *net.UDPAddr, f extensionConfident) []*Socket {
+	mx.mapLock.Lock()
+	defer mx.mapLock.Unlock()
+	socketList := make([]*Socket, 0, len(mx.socketMap))
+	for _, conn := range mx.socketMap {
+		if conn.addr.Port != toAddr.Port {
+			continue
+		}
+		if !conn.addr.IP.Equal(toAddr.IP) {
+			continue
+		}
+
+		if f(conn) {
+			socketList = append(socketList, conn)
+		}
+	}
+	return socketList
 }
 
 func (mx *SocketMultiplexer) getSocketList() []*Socket {
