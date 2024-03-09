@@ -198,7 +198,7 @@ type SocketMultiplexer struct {
 	packetTimeCallback func() time.Duration
 
 	rstInfo                  []rstInfo
-	mapLock                  sync.Mutex
+	mapLock                  sync.RWMutex
 	socketMap                map[string]*Socket
 	maxPacketSize            int
 	dynamicPacketSizeEnabled bool
@@ -3388,8 +3388,8 @@ func (mx *SocketMultiplexer) CheckTimeouts() {
 type extensionConfident func(conn *Socket) bool
 
 func (mx *SocketMultiplexer) filterSocket(toAddr *net.UDPAddr, f extensionConfident) []*Socket {
-	mx.mapLock.Lock()
-	defer mx.mapLock.Unlock()
+	mx.mapLock.RLock()
+	defer mx.mapLock.RUnlock()
 	socketList := make([]*Socket, 0, len(mx.socketMap))
 	for _, conn := range mx.socketMap {
 		if conn.addr.Port != toAddr.Port {
@@ -3407,8 +3407,8 @@ func (mx *SocketMultiplexer) filterSocket(toAddr *net.UDPAddr, f extensionConfid
 }
 
 func (mx *SocketMultiplexer) getSocketList() []*Socket {
-	mx.mapLock.Lock()
-	defer mx.mapLock.Unlock()
+	mx.mapLock.RLock()
+	defer mx.mapLock.RUnlock()
 	socketList := make([]*Socket, 0, len(mx.socketMap))
 	for _, conn := range mx.socketMap {
 		socketList = append(socketList, conn)
