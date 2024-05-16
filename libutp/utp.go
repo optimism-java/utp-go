@@ -3100,6 +3100,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	mx.logger.Debug("recv",
 		zap.Int("len", len(buffer)),
 		zap.Uint32("id", id),
+		zap.Any("pk_type", ph.getPacketType()),
 		zap.Uint16("seq_nr", ph.getSequenceNumber()),
 		zap.Uint16("ack_nr", ph.getAckNumber()),
 		zap.Any("src_addr", toAddr.String()),
@@ -3125,6 +3126,20 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 					socketErr = syscall.ECONNREFUSED
 				}
 				conn.callbackTable.OnError(conn.userdata, socketErr)
+			}
+			return true
+		} else if flags == stSyn {
+			read := mx.processIncoming(conn, buffer, true, currentMS)
+			mx.logger.Debug("recv send connect ACK")
+			conn.sendAck(false, currentMS)
+			if conn.userdata != nil {
+				// SYN
+				conn.callbackTable.OnOverhead(
+					conn.userdata, false, len(buffer)-read+conn.GetUDPOverhead(),
+					HeaderOverhead)
+				// SYNACK
+				conn.callbackTable.OnOverhead(conn.userdata, true, conn.GetOverhead(),
+					AckOverhead)
 			}
 			return true
 		} else if flags != stSyn {
