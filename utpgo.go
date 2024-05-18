@@ -9,8 +9,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/optimism-java/utp-go/buffers"
-	"github.com/optimism-java/utp-go/libutp"
 	"io"
 	"net"
 	"os"
@@ -18,6 +16,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/optimism-java/utp-go/buffers"
+	"github.com/optimism-java/utp-go/libutp"
 
 	"go.uber.org/zap"
 )
@@ -99,7 +100,7 @@ type Listener struct {
 
 	acceptChan      <-chan *Conn
 	lock            sync.Mutex
-	incommingConn   map[*Conn]uint32
+	incomingConn    map[*Conn]uint32
 	requiringConnId map[uint32]bool
 }
 
@@ -322,7 +323,7 @@ func listen(s *utpDialState, network string, localAddr *Addr) (*Listener, error)
 			manager:   manager,
 		},
 		acceptChan:      manager.acceptChan,
-		incommingConn:   make(map[*Conn]uint32),
+		incomingConn:    make(map[*Conn]uint32),
 		requiringConnId: make(map[uint32]bool),
 	}
 	manager.start()
@@ -721,18 +722,24 @@ func (l *Listener) recordRequireConnId(connId uint32) {
 func (l *Listener) putInCommingConn(newConn *Conn) {
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	l.incommingConn[newConn] = newConn.baseConn.ConnSeed
+	l.incomingConn[newConn] = newConn.baseConn.ConnSeed
 }
 
-func (l *Listener) filterConn(newConn *Conn, connIdSeed uint32) *Conn {
+func (l *Listener) filterConn(newConn *Conn, connSendId uint32) *Conn {
+	sendId := newConn.baseConn.ConnIDSend
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	sendId := newConn.baseConn.ConnIDSend
-	if sendId == connIdSeed || (connIdSeed == 0 && !l.requiringConnId[sendId]) {
+	if sendId == connSendId || (connSendId == 0 && !l.requiringConnId[sendId]) {
+		l.manager.logger.Debug("the new conn is feat",
+			zap.Uint32("connSendId", newConn.baseConn.ConnIDSend),
+			zap.Uint32("connRecvId", newConn.baseConn.ConnIDRecv))
 		return newConn
 	}
-	if _, exist := l.incommingConn[newConn]; !exist {
-		l.incommingConn[newConn] = sendId
+	if _, exist := l.incomingConn[newConn]; !exist {
+		l.manager.logger.Debug("will put new conn to incomingConn map",
+			zap.Uint32("connSendId", newConn.baseConn.ConnIDSend),
+			zap.Uint32("connRecvId", newConn.baseConn.ConnIDRecv))
+		l.incomingConn[newConn] = sendId
 	}
 	return nil
 }
@@ -740,18 +747,21 @@ func (l *Listener) filterConn(newConn *Conn, connIdSeed uint32) *Conn {
 func (l *Listener) removeAndGetComingConn(connSendId uint32) *Conn {
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	if len(l.incommingConn) == 0 {
+	if len(l.incomingConn) == 0 {
 		return nil
 	}
 	var result *Conn
-	for conn, connIdSeed := range l.incommingConn {
+	for conn, connIdSeed := range l.incomingConn {
 		if connSendId == connIdSeed || (connSendId == 0 && !l.requiringConnId[connIdSeed]) {
 			result = conn
 			break
 		}
 	}
 	if result != nil {
-		delete(l.incommingConn, result)
+		l.manager.logger.Debug("found conn in incomingConn map",
+			zap.Uint32("connSendId", result.baseConn.ConnIDSend),
+			zap.Uint32("connRecvId", result.baseConn.ConnIDRecv))
+		delete(l.incomingConn, result)
 		delete(l.requiringConnId, result.baseConn.ConnSeed)
 	}
 	return result
