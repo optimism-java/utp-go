@@ -94,16 +94,37 @@ func TestAcceptWithoutConnId(t *testing.T) {
 
 }
 
+func TestAcceptConnAlreadyIncoming(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.DebugLevel))
+	l := newTestServer(t, logger.Named("server"))
+	connNoSetConnId, err := utp.DialOptions("utp", l.Addr().String(), utp.WithLogger(logger.Named("client")), utp.WithConnId(uint32(13)))
+	if err != nil {
+		panic(err)
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(1)*time.Hour)
+		conn, err := l.AcceptUTPContext(ctx, 13)
+		if err != nil {
+			panic(err)
+		}
+		conn.Close()
+		cancel()
+	}()
+	time.Sleep(time.Duration(2) * time.Minute)
+	connNoSetConnId.Close()
+
+}
+
 func TestAcceptTimeout(t *testing.T) {
 	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.DebugLevel))
 	l := newTestServer(t, logger.Named("server"))
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(1)*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(5)*time.Second)
 		_, err := l.AcceptUTPContext(ctx, 13)
 		assert.Equal(t, true, err != nil, "except timeout but not")
 		cancel()
 	}()
-	time.Sleep(time.Duration(2) * time.Second)
+	time.Sleep(time.Duration(20) * time.Second)
 }
 
 func TestListenerClosed(t *testing.T) {
