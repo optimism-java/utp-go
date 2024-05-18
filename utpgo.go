@@ -682,14 +682,14 @@ func (c *Conn) makeOpError(op string, err error) error {
 var _ net.Conn = &Conn{}
 
 // AcceptUTPContext accepts a new µTP connection on a listening socket.
-func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Conn, error) {
-	l.recordRequireConnId(connIdSeed)
+func (l *Listener) AcceptUTPContext(ctx context.Context, connSendId uint32) (*Conn, error) {
+	l.recordRequireConnId(connSendId)
 	ticker := time.NewTicker(time.Millisecond * 17)
 	for {
 		select {
 		case newConn, ok := <-l.acceptChan:
 			if ok {
-				if conn := l.filterConn(newConn, connIdSeed); conn != nil {
+				if conn := l.filterConn(newConn, connSendId); conn != nil {
 					return conn, nil
 				}
 				continue
@@ -700,7 +700,7 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Co
 			}
 			return nil, err
 		case <-ticker.C:
-			if conn := l.removeAndGetCommingConn(connIdSeed); conn != nil {
+			if conn := l.removeAndGetComingConn(connSendId); conn != nil {
 				return conn, nil
 			}
 		case <-ctx.Done():
@@ -727,17 +727,17 @@ func (l *Listener) putInCommingConn(newConn *Conn) {
 func (l *Listener) filterConn(newConn *Conn, connIdSeed uint32) *Conn {
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	connSeed := newConn.baseConn.ConnSeed
-	if connSeed == connIdSeed || (connIdSeed == 0 && !l.requiringConnId[connSeed]) {
+	sendId := newConn.baseConn.ConnIDSend
+	if sendId == connIdSeed || (connIdSeed == 0 && !l.requiringConnId[sendId]) {
 		return newConn
 	}
 	if _, exist := l.incommingConn[newConn]; !exist {
-		l.incommingConn[newConn] = newConn.baseConn.ConnSeed
+		l.incommingConn[newConn] = sendId
 	}
 	return nil
 }
 
-func (l *Listener) removeAndGetCommingConn(connId uint32) *Conn {
+func (l *Listener) removeAndGetComingConn(connSendId uint32) *Conn {
 	l.lock.Lock()
 	defer l.lock.Unlock()
 	if len(l.incommingConn) == 0 {
@@ -745,7 +745,7 @@ func (l *Listener) removeAndGetCommingConn(connId uint32) *Conn {
 	}
 	var result *Conn
 	for conn, connIdSeed := range l.incommingConn {
-		if connId == connIdSeed || (connId == 0 && !l.requiringConnId[connIdSeed]) {
+		if connSendId == connIdSeed || (connSendId == 0 && !l.requiringConnId[connIdSeed]) {
 			result = conn
 			break
 		}
@@ -1168,6 +1168,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 	}, newUTPConn)
 	sm.logger.Info("accepted new connection",
 		zap.Stringer("remote-addr", newUTPConn.RemoteAddr()),
+		zap.Uint32("seedId", newUTPConn.baseConn.ConnSeed),
 		zap.Uint32("sendId", newUTPConn.baseConn.ConnIDSend),
 		zap.Uint32("recvId", newUTPConn.baseConn.ConnIDRecv))
 	newUTPConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, sm.readBufferSize)
