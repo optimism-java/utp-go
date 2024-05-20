@@ -844,11 +844,13 @@ func (u *utpSocket) LocalAddr() net.Addr {
 type MessageWriter func(buf []byte, addr *net.UDPAddr) (int, error)
 
 type PacketRouter struct {
-	udpSocket   *net.UDPConn
-	sm          *SocketManager
-	mw          MessageWriter
-	once        sync.Once
-	packetCache chan *packet
+	udpSocket     *net.UDPConn
+	sm            *SocketManager
+	mw            MessageWriter
+	mwOnce        sync.Once
+	rmOnce        sync.Once
+	mwPacketCache chan *packet
+	rmPacketCache chan *packet
 }
 
 type packet struct {
@@ -858,21 +860,40 @@ type packet struct {
 
 func NewPacketRouter(mw MessageWriter) *PacketRouter {
 	return &PacketRouter{
-		mw:          mw,
-		packetCache: make(chan *packet, 100),
+		mw:            mw,
+		mwPacketCache: make(chan *packet, 100),
+		rmPacketCache: make(chan *packet, 100),
 	}
 }
 
 func (pr *PacketRouter) WriteMsg(buf []byte, addr *net.UDPAddr) (int, error) {
+	pr.mwOnce.Do(func() {
+		for i := 0; i < runtime.NumCPU()*2; i++ {
+			go func() {
+				for {
+					if packPt, ok := <-pr.mwPacketCache; ok {
+						_, err := pr.mw(packPt.buf, packPt.addr)
+						if err != nil {
+							pr.sm.logger.Warn("Packet router writes packet failed", zap.Error(err))
+						}
+					} else {
+						pr.sm.logger.Info("Packet router has been stopped")
+						return
+					}
+				}
+			}()
+		}
+	})
+	pr.mwPacketCache <- &packet{buf: buf, addr: addr}
 	return pr.mw(buf, addr)
 }
 
 func (pr *PacketRouter) ReceiveMessage(buf []byte, addr *net.UDPAddr) {
-	pr.once.Do(func() {
+	pr.rmOnce.Do(func() {
 		for i := 0; i < runtime.NumCPU()*2; i++ {
 			go func() {
 				for {
-					if packPt, ok := <-pr.packetCache; ok {
+					if packPt, ok := <-pr.rmPacketCache; ok {
 						pr.sm.processIncomingPacket(packPt.buf, packPt.addr)
 					} else {
 						pr.sm.logger.Info("Packet router has been stopped")
@@ -882,7 +903,7 @@ func (pr *PacketRouter) ReceiveMessage(buf []byte, addr *net.UDPAddr) {
 			}()
 		}
 	})
-	pr.packetCache <- &packet{buf: buf, addr: addr}
+	pr.rmPacketCache <- &packet{buf: buf, addr: addr}
 }
 
 type SocketManager struct {
@@ -1082,7 +1103,8 @@ func (sm *SocketManager) internalClose() {
 	sm.closeErr <- err
 	close(sm.closeErr)
 	close(sm.acceptChan)
-	close(sm.pr.packetCache)
+	close(sm.pr.mwPacketCache)
+	close(sm.pr.rmPacketCache)
 }
 
 func (sm *SocketManager) incrementReferences() {
