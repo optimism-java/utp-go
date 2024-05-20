@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"runtime/pprof"
 	"sync"
 	"syscall"
@@ -868,16 +869,18 @@ func (pr *PacketRouter) WriteMsg(buf []byte, addr *net.UDPAddr) (int, error) {
 
 func (pr *PacketRouter) ReceiveMessage(buf []byte, addr *net.UDPAddr) {
 	pr.once.Do(func() {
-		go func() {
-			for {
-				if packPt, ok := <-pr.packetCache; ok {
-					pr.sm.processIncomingPacket(packPt.buf, packPt.addr)
-				} else {
-					pr.sm.logger.Info("Packet router has been stopped")
-					return
+		for i := 0; i < runtime.NumCPU()*2; i++ {
+			go func() {
+				for {
+					if packPt, ok := <-pr.packetCache; ok {
+						pr.sm.processIncomingPacket(packPt.buf, packPt.addr)
+					} else {
+						pr.sm.logger.Info("Packet router has been stopped")
+						return
+					}
 				}
-			}
-		}()
+			}()
+		}
 	})
 	pr.packetCache <- &packet{buf: buf, addr: addr}
 }
