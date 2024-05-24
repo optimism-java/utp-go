@@ -861,31 +861,35 @@ type packet struct {
 func NewPacketRouter(mw MessageWriter) *PacketRouter {
 	return &PacketRouter{
 		mw:            mw,
-		mwPacketCache: make(chan *packet, 100),
-		rmPacketCache: make(chan *packet, 100),
+		mwPacketCache: make(chan *packet, runtime.NumCPU()*2),
+		rmPacketCache: make(chan *packet, runtime.NumCPU()*2),
 	}
 }
 
 func (pr *PacketRouter) WriteMsg(buf []byte, addr *net.UDPAddr) (int, error) {
 	pr.mwOnce.Do(func() {
-		for i := 0; i < runtime.NumCPU()*2; i++ {
+		for i := 0; i < runtime.NumCPU()*4; i++ {
 			go func() {
 				for {
-					if packPt, ok := <-pr.mwPacketCache; ok {
+					select {
+					case packPt, ok := <-pr.mwPacketCache:
+						if !ok {
+							pr.sm.logger.Info("Packet router has been stopped")
+							return
+						}
 						_, err := pr.mw(packPt.buf, packPt.addr)
 						if err != nil {
 							pr.sm.logger.Warn("Packet router writes packet failed", zap.Error(err))
 						}
-					} else {
-						pr.sm.logger.Info("Packet router has been stopped")
-						return
 					}
 				}
 			}()
 		}
 	})
-	pr.mwPacketCache <- &packet{buf: buf, addr: addr}
-	return pr.mw(buf, addr)
+	select {
+	case pr.mwPacketCache <- &packet{buf: buf, addr: addr}:
+		return len(buf), nil
+	}
 }
 
 func (pr *PacketRouter) ReceiveMessage(buf []byte, addr *net.UDPAddr) {
@@ -893,17 +897,21 @@ func (pr *PacketRouter) ReceiveMessage(buf []byte, addr *net.UDPAddr) {
 		for i := 0; i < runtime.NumCPU()*2; i++ {
 			go func() {
 				for {
-					if packPt, ok := <-pr.rmPacketCache; ok {
+					select {
+					case packPt, ok := <-pr.rmPacketCache:
+						if !ok {
+							pr.sm.logger.Info("Packet router has been stopped")
+							return
+						}
 						pr.sm.processIncomingPacket(packPt.buf, packPt.addr)
-					} else {
-						pr.sm.logger.Info("Packet router has been stopped")
-						return
 					}
 				}
 			}()
 		}
 	})
-	pr.rmPacketCache <- &packet{buf: buf, addr: addr}
+	select {
+	case pr.rmPacketCache <- &packet{buf: buf, addr: addr}:
+	}
 }
 
 type SocketManager struct {
