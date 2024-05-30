@@ -202,8 +202,8 @@ func dial(ctx context.Context, s *utpDialState, network string, localAddr, remot
 		connectChan:       make(chan struct{}),
 		closeChan:         make(chan struct{}),
 		baseConnDestroyed: make(chan struct{}),
-		readBuffer:        buffers.NewSyncBuffer(manager.readBufferSize * receiveBufferMultiplier),
-		writeBuffer:       buffers.NewSyncBuffer(manager.writeBufferSize),
+		readBuffer:        buffers.NewSyncBufferWithBuf(manager.ReadBufferPool.Get().([]byte)),
+		writeBuffer:       buffers.NewSyncBufferWithBuf(manager.WriteBufferPool.Get().([]byte)),
 	}
 	connLogger.Debug("creating outgoing socket")
 	// thread-safe here, because no other goroutines could have a handle to
@@ -428,9 +428,14 @@ func (c *Conn) Close() error {
 
 	// wait for write buffer to be flushed
 	c.writeBuffer.FlushAndClose()
-
+	if buf, err := c.writeBuffer.GetCleanBuf(); err == nil {
+		c.manager.WriteBufferPool.Put(buf)
+	}
 	// if there are still any blocked reads, shut them down
 	c.readBuffer.Close()
+	if buf, err := c.readBuffer.GetCleanBuf(); err == nil {
+		c.manager.ReadBufferPool.Put(buf)
+	}
 
 	// close baseConn
 	err := func() error {
@@ -916,6 +921,9 @@ type SocketManager struct {
 	remoteAddr *net.UDPAddr
 	// isShared flag if this SocketManager is share with other. When using WithSocketManager option, it will be set true.
 	isShared bool
+
+	WriteBufferPool *sync.Pool
+	ReadBufferPool  *sync.Pool
 }
 
 const (
@@ -987,12 +995,28 @@ func newSocketManager(s *utpDialState, network string, localAddr, remoteAddr *ne
 		remoteAddr:   remoteAddr,
 		isShared:     false,
 	}
+
 	if s.readBufferSize == 0 {
 		sm.readBufferSize = readBufferSize
 	}
 	if s.writeBufferSize == 0 {
 		sm.writeBufferSize = writeBufferSize
 	}
+
+	sm.WriteBufferPool = &sync.Pool{
+		New: func() any {
+			return make([]byte, sm.writeBufferSize)
+			//return buffers.NewSyncBuffer(sm.writeBufferSize)
+		},
+	}
+
+	sm.ReadBufferPool = &sync.Pool{
+		New: func() any {
+			return make([]byte, sm.readBufferSize*receiveBufferMultiplier)
+			//return buffers.NewSyncBuffer(sm.readBufferSize * receiveBufferMultiplier)
+		},
+	}
+
 	sm.pr.sm = sm
 	return sm, nil
 }
@@ -1156,8 +1180,8 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		baseConn:          newBaseConn,
 		closeChan:         make(chan struct{}),
 		baseConnDestroyed: make(chan struct{}),
-		readBuffer:        buffers.NewSyncBuffer(sm.readBufferSize * receiveBufferMultiplier),
-		writeBuffer:       buffers.NewSyncBuffer(sm.writeBufferSize),
+		readBuffer:        buffers.NewSyncBufferWithBuf(sm.ReadBufferPool.Get().([]byte)),
+		writeBuffer:       buffers.NewSyncBufferWithBuf(sm.WriteBufferPool.Get().([]byte)),
 	}
 	newBaseConn.SetCallbacks(&libutp.CallbackTable{
 		OnRead:    onReadCallback,
@@ -1281,8 +1305,15 @@ func (c *Conn) onConnectionFailure(err error) {
 	// to Close() is already waiting, we don't need to make it wait any
 	// longer
 	c.writeBuffer.Close()
+	if buf, err := c.writeBuffer.GetCleanBuf(); err == nil {
+		c.manager.WriteBufferPool.Put(buf)
+	}
+
 	// this will allow any pending reads to complete (as short reads)
 	c.readBuffer.CloseForWrites()
+	if buf, err := c.readBuffer.GetCleanBuf(); err == nil {
+		c.manager.ReadBufferPool.Put(buf)
+	}
 
 	c.stateDebugLog("finishing onConnectionFailure")
 }

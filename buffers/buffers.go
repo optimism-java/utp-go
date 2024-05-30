@@ -49,6 +49,12 @@ func NewSyncBuffer(size int) *SyncCircularBuffer {
 	}
 }
 
+func NewSyncBufferWithBuf(buf []byte) *SyncCircularBuffer {
+	return &SyncCircularBuffer{
+		buffer: buf,
+	}
+}
+
 // WaitForBytesChan returns a channel that will be written to after n bytes have
 // been written to the buffer and are available for reading. It is possible for
 // another goroutine to read the bytes before the goroutine that is waiting on
@@ -401,6 +407,18 @@ func (sb *SyncCircularBuffer) Clear() {
 	for i := 0; i < len(sb.buffer); i++ {
 		sb.buffer[i] = 0
 	}
+}
+
+func (sb *SyncCircularBuffer) GetCleanBuf() ([]byte, error) {
+	sb.lock.Lock()
+	defer sb.lock.Unlock()
+	if !sb.closedForWrites && !sb.closedForReads {
+		return nil, fmt.Errorf("buffer is not closed")
+	}
+	for i := 0; i < len(sb.buffer); i++ {
+		sb.buffer[i] = 0
+	}
+	return sb.buffer, nil
 }
 
 // Close closes the buffer for both reading and writing. Any waiters are
