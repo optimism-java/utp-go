@@ -9,17 +9,15 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/optimism-java/utp-go/buffers"
+	"github.com/optimism-java/utp-go/libutp"
 	"io"
 	"net"
 	"os"
-	"runtime"
 	"runtime/pprof"
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/optimism-java/utp-go/buffers"
-	"github.com/optimism-java/utp-go/libutp"
 
 	"go.uber.org/zap"
 )
@@ -101,7 +99,7 @@ type Listener struct {
 
 	acceptChan      <-chan *Conn
 	lock            sync.Mutex
-	incomingConn    map[*Conn]uint32
+	incommingConn   map[*Conn]uint32
 	requiringConnId map[uint32]bool
 }
 
@@ -324,7 +322,7 @@ func listen(s *utpDialState, network string, localAddr *Addr) (*Listener, error)
 			manager:   manager,
 		},
 		acceptChan:      manager.acceptChan,
-		incomingConn:    make(map[*Conn]uint32),
+		incommingConn:   make(map[*Conn]uint32),
 		requiringConnId: make(map[uint32]bool),
 	}
 	manager.start()
@@ -684,14 +682,14 @@ func (c *Conn) makeOpError(op string, err error) error {
 var _ net.Conn = &Conn{}
 
 // AcceptUTPContext accepts a new µTP connection on a listening socket.
-func (l *Listener) AcceptUTPContext(ctx context.Context, connSendId uint32) (*Conn, error) {
-	l.recordRequireConnId(connSendId)
+func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Conn, error) {
+	l.recordRequireConnId(connIdSeed)
 	ticker := time.NewTicker(time.Millisecond * 17)
 	for {
 		select {
 		case newConn, ok := <-l.acceptChan:
 			if ok {
-				if conn := l.filterConn(newConn, connSendId); conn != nil {
+				if conn := l.filterConn(newConn, connIdSeed); conn != nil {
 					return conn, nil
 				}
 				continue
@@ -702,7 +700,7 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, connSendId uint32) (*Co
 			}
 			return nil, err
 		case <-ticker.C:
-			if conn := l.removeAndGetComingConn(connSendId); conn != nil {
+			if conn := l.removeAndGetCommingConn(connIdSeed); conn != nil {
 				return conn, nil
 			}
 		case <-ctx.Done():
@@ -723,46 +721,37 @@ func (l *Listener) recordRequireConnId(connId uint32) {
 func (l *Listener) putInCommingConn(newConn *Conn) {
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	l.incomingConn[newConn] = newConn.baseConn.ConnSeed
+	l.incommingConn[newConn] = newConn.baseConn.ConnSeed
 }
 
-func (l *Listener) filterConn(newConn *Conn, connSendId uint32) *Conn {
-	sendId := newConn.baseConn.ConnIDSend
+func (l *Listener) filterConn(newConn *Conn, connIdSeed uint32) *Conn {
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	if sendId == connSendId || (connSendId == 0 && !l.requiringConnId[sendId]) {
-		l.manager.logger.Debug("the new conn is feat",
-			zap.Uint32("connSendId", newConn.baseConn.ConnIDSend),
-			zap.Uint32("connRecvId", newConn.baseConn.ConnIDRecv))
+	connSeed := newConn.baseConn.ConnSeed
+	if connSeed == connIdSeed || (connIdSeed == 0 && !l.requiringConnId[connSeed]) {
 		return newConn
 	}
-	if _, exist := l.incomingConn[newConn]; !exist {
-		l.manager.logger.Debug("will put new conn to incomingConn map",
-			zap.Uint32("connSendId", newConn.baseConn.ConnIDSend),
-			zap.Uint32("connRecvId", newConn.baseConn.ConnIDRecv))
-		l.incomingConn[newConn] = sendId
+	if _, exist := l.incommingConn[newConn]; !exist {
+		l.incommingConn[newConn] = newConn.baseConn.ConnSeed
 	}
 	return nil
 }
 
-func (l *Listener) removeAndGetComingConn(connSendId uint32) *Conn {
+func (l *Listener) removeAndGetCommingConn(connId uint32) *Conn {
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	if len(l.incomingConn) == 0 {
+	if len(l.incommingConn) == 0 {
 		return nil
 	}
 	var result *Conn
-	for conn, connIdSeed := range l.incomingConn {
-		if connSendId == connIdSeed || (connSendId == 0 && !l.requiringConnId[connIdSeed]) {
+	for conn, connIdSeed := range l.incommingConn {
+		if connId == connIdSeed || (connId == 0 && !l.requiringConnId[connIdSeed]) {
 			result = conn
 			break
 		}
 	}
 	if result != nil {
-		l.manager.logger.Debug("found conn in incomingConn map",
-			zap.Uint32("connSendId", result.baseConn.ConnIDSend),
-			zap.Uint32("connRecvId", result.baseConn.ConnIDRecv))
-		delete(l.incomingConn, result)
+		delete(l.incommingConn, result)
 		delete(l.requiringConnId, result.baseConn.ConnSeed)
 	}
 	return result
@@ -844,13 +833,11 @@ func (u *utpSocket) LocalAddr() net.Addr {
 type MessageWriter func(buf []byte, addr *net.UDPAddr) (int, error)
 
 type PacketRouter struct {
-	udpSocket     *net.UDPConn
-	sm            *SocketManager
-	mw            MessageWriter
-	mwOnce        sync.Once
-	rmOnce        sync.Once
-	mwPacketCache chan *packet
-	rmPacketCache chan *packet
+	udpSocket   *net.UDPConn
+	sm          *SocketManager
+	mw          MessageWriter
+	once        sync.Once
+	packetCache chan *packet
 }
 
 type packet struct {
@@ -860,58 +847,29 @@ type packet struct {
 
 func NewPacketRouter(mw MessageWriter) *PacketRouter {
 	return &PacketRouter{
-		mw:            mw,
-		mwPacketCache: make(chan *packet, runtime.NumCPU()*2),
-		rmPacketCache: make(chan *packet, runtime.NumCPU()*2),
+		mw:          mw,
+		packetCache: make(chan *packet, 100),
 	}
 }
 
 func (pr *PacketRouter) WriteMsg(buf []byte, addr *net.UDPAddr) (int, error) {
-	pr.mwOnce.Do(func() {
-		for i := 0; i < runtime.NumCPU()*4; i++ {
-			go func() {
-				for {
-					select {
-					case packPt, ok := <-pr.mwPacketCache:
-						if !ok {
-							pr.sm.logger.Info("Packet router has been stopped")
-							return
-						}
-						_, err := pr.mw(packPt.buf, packPt.addr)
-						if err != nil {
-							pr.sm.logger.Warn("Packet router writes packet failed", zap.Error(err))
-						}
-					}
-				}
-			}()
-		}
-	})
-	select {
-	case pr.mwPacketCache <- &packet{buf: buf, addr: addr}:
-		return len(buf), nil
-	}
+	return pr.mw(buf, addr)
 }
 
 func (pr *PacketRouter) ReceiveMessage(buf []byte, addr *net.UDPAddr) {
-	pr.rmOnce.Do(func() {
-		for i := 0; i < runtime.NumCPU()*2; i++ {
-			go func() {
-				for {
-					select {
-					case packPt, ok := <-pr.rmPacketCache:
-						if !ok {
-							pr.sm.logger.Info("Packet router has been stopped")
-							return
-						}
-						pr.sm.processIncomingPacket(packPt.buf, packPt.addr)
-					}
+	pr.once.Do(func() {
+		go func() {
+			for {
+				if packPt, ok := <-pr.packetCache; ok {
+					pr.sm.processIncomingPacket(packPt.buf, packPt.addr)
+				} else {
+					pr.sm.logger.Info("Packet router has been stopped")
+					return
 				}
-			}()
-		}
+			}
+		}()
 	})
-	select {
-	case pr.rmPacketCache <- &packet{buf: buf, addr: addr}:
-	}
+	pr.packetCache <- &packet{buf: buf, addr: addr}
 }
 
 type SocketManager struct {
@@ -1111,8 +1069,7 @@ func (sm *SocketManager) internalClose() {
 	sm.closeErr <- err
 	close(sm.closeErr)
 	close(sm.acceptChan)
-	close(sm.pr.mwPacketCache)
-	close(sm.pr.rmPacketCache)
+	close(sm.pr.packetCache)
 }
 
 func (sm *SocketManager) incrementReferences() {
@@ -1209,11 +1166,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		OnState:   onStateCallback,
 		OnError:   onErrorCallback,
 	}, newUTPConn)
-	sm.logger.Info("accepted new connection",
-		zap.Stringer("remote-addr", newUTPConn.RemoteAddr()),
-		zap.Uint32("seedId", newUTPConn.baseConn.ConnSeed),
-		zap.Uint32("sendId", newUTPConn.baseConn.ConnIDSend),
-		zap.Uint32("recvId", newUTPConn.baseConn.ConnIDRecv))
+	sm.logger.Info("accepted new connection", zap.Stringer("remote-addr", newUTPConn.RemoteAddr()))
 	newUTPConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, sm.readBufferSize)
 	select {
 	case sm.acceptChan <- newUTPConn:
