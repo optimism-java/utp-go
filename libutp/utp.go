@@ -135,6 +135,8 @@ func (c *ConnId) SendId() uint32 {
 type ConnIdGenerator interface {
 	// GenCid generates a random connection id
 	GenCid(peer any, isInitiator bool) *ConnId
+	// Remove ConnId record
+	Remove(c *ConnId)
 }
 
 // DefaultConnIdGenerator default connection id generator, it will generate random connection id

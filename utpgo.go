@@ -690,6 +690,7 @@ var _ net.Conn = &Conn{}
 func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Conn, error) {
 	l.recordRequireConnId(connIdSeed)
 	ticker := time.NewTicker(time.Millisecond * 17)
+	defer ticker.Stop()
 	for {
 		select {
 		case newConn, ok := <-l.acceptChan:
