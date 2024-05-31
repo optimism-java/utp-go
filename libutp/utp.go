@@ -178,8 +178,8 @@ func (g *DefaultConnIdGenerator) GenCid(p any, isInitiator bool) *ConnId {
 func (g *DefaultConnIdGenerator) Remove(c *ConnId) {
 	g.lock.Lock()
 	defer g.lock.Unlock()
-	if _, ok := g.Cids[c]; ok {
-		delete(g.Cids, c)
+	if _, ok := g.Cids[*c]; ok {
+		delete(g.Cids, *c)
 	}
 }
 
