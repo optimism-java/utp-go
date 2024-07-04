@@ -106,7 +106,7 @@ func SendCid(connSeed uint32) *ConnId {
 	return &ConnId{
 		connSeed: connSeed,
 		recvId:   connSeed,
-		sendId:   connSeed + 1,
+		sendId:   (connSeed + 1) & 0xFFFF,
 	}
 }
 
@@ -115,7 +115,7 @@ func ReceConnId(connSeed uint32) *ConnId {
 		// Need to track this value to be able to detect duplicate CONNECTs
 		connSeed: connSeed,
 		// This is value that identifies this connection for us.
-		recvId: connSeed + 1,
+		recvId: (connSeed + 1) & 0xFFFF,
 		// This is value that identifies this connection for them.
 		sendId: connSeed,
 	}
@@ -2359,7 +2359,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		}
 	}
 
-	if conn.state == csSynSent && pkFlags == stState {
+	if (conn.state == csSynSent || conn.ackNum == 0) && pkFlags == stState {
 		// if this is a syn-ack, initialize our ackNum
 		// to match the sequence number we got from
 		// the other end
@@ -2381,7 +2381,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 
 	mx.logger.Debug("seq_num = (pk_seq_num - conn_ack_num - 1) & 0xFFFF", zap.Uint16("seq_num", seqNum), zap.Uint16("pk_seq_num", pkSeqNum), zap.Uint16("conn_ack_num", conn.ackNum))
 	// Getting an invalid sequence number?
-	if seqNum >= reorderBufferMaxSize {
+	if conn.ackNum != 0 && seqNum >= reorderBufferMaxSize {
 		if seqNum >= (seqNumberMask+1)-reorderBufferMaxSize && pkFlags != stState {
 			conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, delayedAckTimeThreshold)
 		}
@@ -2636,6 +2636,9 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 
 	if pkFlags == stState {
 		// This is a state packet only.
+		if conn.reorderCount != 0 {
+			mx.handleReorderCache(conn, currentMS)
+		}
 		return 0
 	}
 
@@ -2672,53 +2675,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		conn.ackNum++
 		conn.bytesSinceAck += count
 
-		// Check if the next packet has been received too, but waiting
-		// in the reorder buffer.
-		for {
-			if conn.gotFin && conn.eofPacket == conn.ackNum {
-				if conn.state != csFinSent {
-					conn.state = csGotFin
-					conn.rtoTimeout = uint(currentMS) + minUint(conn.rto*3, 60)
-
-					mx.logger.Debug("Posting EOF")
-					conn.callbackTable.OnState(conn.userdata, StateEOF)
-				}
-
-				// if the other end wants to close, ack immediately
-				conn.sendAck(false, currentMS)
-
-				// reorderCount is not necessarily 0 at this point.
-				// even though it is most of the time, the other end
-				// may have sent packets with higher sequence numbers
-				// than what later end up being eofPacket
-				// since we have received all packets up to eofPacket
-				// just ignore the ones after it.
-				conn.reorderCount = 0
-			}
-
-			// Quick get-out in case there is nothing to reorder
-			if conn.reorderCount == 0 {
-				break
-			}
-
-			// Check if there are additional buffers in the reorder buffers
-			// that need delivery.
-			b := conn.inbuf.get(int(conn.ackNum) + 1)
-			if b == nil {
-				break
-			}
-			conn.inbuf.put(int(conn.ackNum)+1, nil)
-			if len(b) > 0 && conn.state != csFinSent {
-				// Pass the bytes to the upper layer
-				mx.logger.Debug("Got Data", zap.Uint16("seq_nr", conn.seqNum), zap.Uint32("connSendId", conn.ConnIDSend), zap.Uint32("connRecvId", conn.ConnIDRecv), zap.Int("len", len(b)))
-				conn.callbackTable.OnRead(conn.userdata, b)
-			}
-			conn.ackNum++
-			conn.bytesSinceAck += len(b)
-
-			dumbAssert(conn.reorderCount > 0)
-			conn.reorderCount--
-		}
+		mx.handleReorderCache(conn, currentMS)
 
 		// start the delayed ACK timer
 		conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, delayedAckTimeThreshold)
@@ -2738,8 +2695,12 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		// one, just drop it. We can't allocate buffer space in
 		// the inbuf entirely based on untrusted input
 		if seqNum > 0x3ff {
-			mx.logger.Debug("Got an invalid packet sequence number, too far off", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
-			return 0
+			if conn.ackNum != 0 {
+				mx.logger.Debug("Got an invalid packet sequence number, too far off", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
+				return 0
+			} else {
+				seqNum = 4 + conn.reorderCount
+			}
 		}
 
 		// we need to grow the circle buffer before we
@@ -2777,6 +2738,9 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, 1)
 	}
 
+	if conn.ackNum == 0 {
+		return packetEnd - data
+	}
 	// If ackTime or bytesSinceAck indicate that we need to send and ack, send one
 	// here instead of waiting for the timer to trigger
 	mx.logger.Debug("check if ack necessary", zap.Int("bytes_since_ack", conn.bytesSinceAck), zap.Uint32("ack_time", currentMS-conn.ackTime))
@@ -2787,6 +2751,56 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		}
 	}
 	return packetEnd - data
+}
+
+func (mx *SocketMultiplexer) handleReorderCache(conn *Socket, currentMS uint32) {
+	// Check if the next packet has been received too, but waiting
+	// in the reorder buffer.
+	for {
+		if conn.gotFin && conn.eofPacket == conn.ackNum {
+			if conn.state != csFinSent {
+				conn.state = csGotFin
+				conn.rtoTimeout = uint(currentMS) + minUint(conn.rto*3, 60)
+
+				mx.logger.Debug("Posting EOF")
+				conn.callbackTable.OnState(conn.userdata, StateEOF)
+			}
+
+			// if the other end wants to close, ack immediately
+			conn.sendAck(false, currentMS)
+
+			// reorderCount is not necessarily 0 at this point.
+			// even though it is most of the time, the other end
+			// may have sent packets with higher sequence numbers
+			// than what later end up being eofPacket
+			// since we have received all packets up to eofPacket
+			// just ignore the ones after it.
+			conn.reorderCount = 0
+		}
+
+		// Quick get-out in case there is nothing to reorder
+		if conn.reorderCount == 0 {
+			break
+		}
+
+		// Check if there are additional buffers in the reorder buffers
+		// that need delivery.
+		b := conn.inbuf.get(int(conn.ackNum) + 1)
+		if b == nil {
+			break
+		}
+		conn.inbuf.put(int(conn.ackNum)+1, nil)
+		if len(b) > 0 && conn.state != csFinSent {
+			// Pass the bytes to the upper layer
+			mx.logger.Debug("Got Data", zap.Uint16("ack_nr", conn.ackNum), zap.Uint16("seq_nr", conn.seqNum), zap.Uint32("connSendId", conn.ConnIDSend), zap.Uint32("connRecvId", conn.ConnIDRecv), zap.Int("len", len(b)))
+			conn.callbackTable.OnRead(conn.userdata, b)
+		}
+		conn.ackNum++
+		conn.bytesSinceAck += len(b)
+
+		dumbAssert(conn.reorderCount > 0)
+		conn.reorderCount--
+	}
 }
 
 // this is at best a wild guess.
@@ -3000,17 +3014,14 @@ func (s *Socket) Connect() {
 
 	currentMS := s.getCurrentMS()
 
-	// Create and send a connect message
-	connSeed := RandomUint32()
-
 	// we identify newer versions by setting the
 	// first two bytes to 0x0001
 	if s.version > 0 {
-		connSeed &= 0xffff
+		s.ConnSeed = s.ConnSeed & 0xFFFF
 	}
 
 	// used in parse_log.py
-	s.logger.Info("UTP_Connect", zap.Uint32("conn_seed", connSeed), zap.Int("packet_size", packetSize), zap.Duration("target_delay", congestionControlTarget*time.Microsecond), zap.Int("delay_history", curDelaySize), zap.Int("delay_base_history", delayBaseHistory))
+	s.logger.Info("UTP_Connect", zap.Uint32("conn_seed", s.ConnSeed), zap.Int("packet_size", packetSize), zap.Duration("target_delay", congestionControlTarget*time.Microsecond), zap.Int("delay_history", curDelaySize), zap.Int("delay_base_history", delayBaseHistory))
 
 	// Setup initial timeout timer.
 	s.retransmitTimeout = 3000
@@ -3019,7 +3030,7 @@ func (s *Socket) Connect() {
 
 	// if you need compatibility with 1.8.1, use this. it increases attackability though.
 	// conn.seqNum = 1
-	s.seqNum = uint16(RandomUint32())
+	s.seqNum = uint16(RandomUint16())
 
 	// Create the connect packet.
 	headerExtSize := s.getHeaderExtensionsSize()
@@ -3102,6 +3113,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	mx.logger.Debug("recv",
 		zap.Int("len", len(buffer)),
 		zap.Uint32("id", id),
+		zap.Any("pkt_type", ph.getPacketType()),
 		zap.Uint16("seq_nr", ph.getSequenceNumber()),
 		zap.Uint16("ack_nr", ph.getAckNumber()),
 		zap.Any("src_addr", toAddr.String()),
@@ -3197,7 +3209,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		// This is value that identifies this connection for us.
 		conn.ConnIDRecv = id + 1
 		conn.ackNum = seqNum
-		conn.seqNum = uint16(RandomUint32())
+		conn.seqNum = uint16(RandomUint16())
 		conn.fastResendSeqNum = conn.seqNum
 
 		conn.SetSockOpt(SO_UTPVERSION, int(version))

@@ -210,7 +210,7 @@ func dial(ctx context.Context, s *utpDialState, network string, localAddr, remot
 	// this mx yet.
 	connId := s.connId
 	if s.connId == 0 {
-		connId = libutp.RandomUint32()
+		connId = libutp.RandomUint16()
 	}
 	utpConn.baseConn, err = manager.mx.Create(packetSendCallback, manager, (*net.UDPAddr)(remoteAddr), libutp.SendCid(connId))
 	if err != nil {

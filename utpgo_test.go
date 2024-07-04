@@ -31,7 +31,7 @@ const (
 )
 
 func TestUTPConnsInSerial(t *testing.T) {
-	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.Level(-10)))
+	logger := zaptest.NewLogger(t, zaptest.Level(zapcore.Level(logLevel)))
 	l := newTestServer(t, logger.Named("server"))
 
 	group := newLabeledErrgroup(context.Background())
