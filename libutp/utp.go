@@ -2359,11 +2359,13 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		}
 	}
 
-	if (conn.state == csSynSent || conn.ackNum == 0) && pkFlags == stState {
+	if conn.state == csSynSent && pkFlags == stState {
 		// if this is a syn-ack, initialize our ackNum
 		// to match the sequence number we got from
 		// the other end
 		conn.ackNum = (pkSeqNum - 1) & seqNumberMask
+	} else if conn.state == csSynSent && pkFlags == stData {
+		return 0
 	}
 
 	currentMS = mx.getCurrentMS()
@@ -2381,7 +2383,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 
 	mx.logger.Debug("seq_num = (pk_seq_num - conn_ack_num - 1) & 0xFFFF", zap.Uint16("seq_num", seqNum), zap.Uint16("pk_seq_num", pkSeqNum), zap.Uint16("conn_ack_num", conn.ackNum))
 	// Getting an invalid sequence number?
-	if conn.ackNum != 0 && seqNum >= reorderBufferMaxSize {
+	if conn.ackNum == 0 || seqNum >= reorderBufferMaxSize {
 		if seqNum >= (seqNumberMask+1)-reorderBufferMaxSize && pkFlags != stState {
 			conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, delayedAckTimeThreshold)
 		}
@@ -2636,9 +2638,6 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 
 	if pkFlags == stState {
 		// This is a state packet only.
-		if conn.reorderCount != 0 {
-			mx.handleReorderCache(conn, currentMS)
-		}
 		return 0
 	}
 
@@ -2695,12 +2694,8 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		// one, just drop it. We can't allocate buffer space in
 		// the inbuf entirely based on untrusted input
 		if seqNum > 0x3ff {
-			if conn.ackNum != 0 {
-				mx.logger.Debug("Got an invalid packet sequence number, too far off", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
-				return 0
-			} else {
-				seqNum = 4 + conn.reorderCount
-			}
+			mx.logger.Debug("Got an invalid packet sequence number, too far off", zap.Uint16("reorder_count", conn.reorderCount), zap.Int("len", packetEnd-data), zap.Int("rb", conn.callbackTable.GetRBSize(conn.userdata)))
+			return 0
 		}
 
 		// we need to grow the circle buffer before we
@@ -2738,9 +2733,6 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 		conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, 1)
 	}
 
-	if conn.ackNum == 0 {
-		return packetEnd - data
-	}
 	// If ackTime or bytesSinceAck indicate that we need to send and ack, send one
 	// here instead of waiting for the timer to trigger
 	mx.logger.Debug("check if ack necessary", zap.Int("bytes_since_ack", conn.bytesSinceAck), zap.Uint32("ack_time", currentMS-conn.ackTime))
