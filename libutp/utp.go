@@ -2383,7 +2383,7 @@ func (mx *SocketMultiplexer) processIncoming(conn *Socket, packet []byte, syn bo
 
 	mx.logger.Debug("seq_num = (pk_seq_num - conn_ack_num - 1) & 0xFFFF", zap.Uint16("seq_num", seqNum), zap.Uint16("pk_seq_num", pkSeqNum), zap.Uint16("conn_ack_num", conn.ackNum))
 	// Getting an invalid sequence number?
-	if conn.ackNum == 0 || seqNum >= reorderBufferMaxSize {
+	if pkFlags == stData && seqNum >= reorderBufferMaxSize {
 		if seqNum >= (seqNumberMask+1)-reorderBufferMaxSize && pkFlags != stState {
 			conn.ackTime = currentMS + minUint32(conn.ackTime-currentMS, delayedAckTimeThreshold)
 		}
