@@ -3190,22 +3190,27 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		cid := ReceConnId(id)
 		// Create a new UTP socket to handle this new connection
 		conn, err := mx.Create(sendToCB, sendToUserdata, toAddr, cid)
-		if err != nil {
-			mx.logger.Error("synchronous connections?", zap.Error(err))
-			return true
-		}
-		// Need to track this value to be able to detect duplicate CONNECTs
-		conn.ConnSeed = id
-		// This is value that identifies this connection for them.
-		conn.ConnIDSend = id
-		// This is value that identifies this connection for us.
-		conn.ConnIDRecv = id + 1
-		conn.ackNum = seqNum
-		conn.seqNum = uint16(RandomUint16())
-		conn.fastResendSeqNum = conn.seqNum
+		if err != nil && err.(*net.OpError).Err == syscall.EADDRINUSE {
+			mx.logger.Debug("synchronous connections? Got connection created", zap.Error(err))
+			conn = mx.socketMap[fmt.Sprintf("%s_%d_%d", toAddr.String(), id, id+1)]
+			if conn == nil {
+				mx.logger.Error("Connection do not exist")
+				return true
+			}
+		} else {
+			// Need to track this value to be able to detect duplicate CONNECTs
+			conn.ConnSeed = id
+			// This is value that identifies this connection for them.
+			conn.ConnIDSend = id
+			// This is value that identifies this connection for us.
+			conn.ConnIDRecv = id + 1
+			conn.ackNum = seqNum
+			conn.seqNum = uint16(RandomUint16())
+			conn.fastResendSeqNum = conn.seqNum
 
-		conn.SetSockOpt(SO_UTPVERSION, int(version))
-		conn.state = csConnected
+			conn.SetSockOpt(SO_UTPVERSION, int(version))
+			conn.state = csConnected
+		}
 
 		read := mx.processIncoming(conn, buffer, true, currentMS)
 
