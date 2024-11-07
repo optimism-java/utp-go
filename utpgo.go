@@ -1170,7 +1170,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		OnState:   onStateCallback,
 		OnError:   onErrorCallback,
 	}, newUTPConn)
-	sm.logger.Info("accepted new connection", zap.Stringer("remote-addr", newUTPConn.RemoteAddr()))
+	sm.logger.Info("accepted new connection", zap.Stringer("remote-addr", newUTPConn.RemoteAddr()), zap.Uint32("sendId", newUTPConn.baseConn.ConnIDSend), zap.Uint32("recvId", newUTPConn.baseConn.ConnIDRecv))
 	newUTPConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, sm.readBufferSize)
 	select {
 	case sm.acceptChan <- newUTPConn:

@@ -3186,8 +3186,9 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 	}
 
 	if incomingCB != nil {
-		mx.logger.Debug("Incoming connection", zap.Int8("utp-version", version))
 		cid := ReceConnId(id)
+		mx.logger.Debug("Incoming connection", zap.Int8("utp-version", version), zap.Any("cid", cid), zap.String("addr", toAddr.String()))
+
 		// Create a new UTP socket to handle this new connection
 		conn, err := mx.Create(sendToCB, sendToUserdata, toAddr, cid)
 		if err != nil && err.(*net.OpError).Err == syscall.EADDRINUSE {
