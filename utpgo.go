@@ -95,13 +95,6 @@ type Conn struct {
 	connectChan chan struct{}
 }
 
-type AcceptReq struct {
-	connCh    chan *Conn
-	cid       *libutp.ConnId
-	nodeId    enode.ID
-	waitingId string
-}
-
 func NewConnIdGenerator() libutp.ConnIdGenerator {
 	return libutp.NewConnIdGenerator()
 }

@@ -13,6 +13,19 @@ import (
 	"github.com/optimism-java/utp-go/libutp"
 )
 
+type AcceptReq struct {
+	connCh    chan *Conn
+	cid       *libutp.ConnId
+	nodeId    enode.ID
+	waitingId string
+}
+
+type PendingAcceptConn struct {
+	key   string
+	conn  *Conn
+	timer *time.Timer
+}
+
 // Listener represents a listening µTP socket.
 type Listener struct {
 	utpSocket
@@ -24,6 +37,7 @@ type Listener struct {
 	acceptWithCidReq     chan *AcceptReq
 	stopWaitingWithCidCh chan *AcceptReq
 	stopWaitingCh        chan string
+	pendingTimeout       chan string
 	closed               chan struct{}
 	closeOnce            sync.Once
 }
@@ -97,6 +111,7 @@ func listen(s *utpDialState, network string, localAddr *Addr) (*Listener, error)
 		acceptWithCidReq:     make(chan *AcceptReq, 10),
 		stopWaitingCh:        make(chan string, 10),
 		stopWaitingWithCidCh: make(chan *AcceptReq, 10),
+		pendingTimeout:       make(chan string, 10),
 		closed:               make(chan struct{}),
 	}
 	manager.start()
@@ -182,7 +197,7 @@ func (l *Listener) Addr() net.Addr {
 func (l *Listener) listenerLoop() {
 	//incommingExpirations DelayedQueue[string]
 	//awaitingExpirations  DelayedQueue[string]
-	incomingConns := make(map[string]*Conn)
+	incomingConns := make(map[string]*PendingAcceptConn)
 	awaiting := make(map[string]*AcceptReq)
 	awaitingWithCid := make(map[string]*AcceptReq)
 
@@ -212,7 +227,13 @@ forLoop:
 				continue forLoop
 			}
 
-			incomingConns[key] = c
+			pendingConn := &PendingAcceptConn{
+				key:  key,
+				conn: c,
+			}
+
+			incomingConns[key] = pendingConn
+			l.connAcceptTimeout(pendingConn)
 
 		case req := <-l.acceptReq:
 			if len(incomingConns) == 0 {
@@ -223,15 +244,17 @@ forLoop:
 			for key = range incomingConns {
 				break
 			}
-			conn := incomingConns[key]
+			pending := incomingConns[key]
 			delete(incomingConns, key)
-			req.connCh <- conn
+			req.connCh <- pending.conn
+			pending.timer.Stop()
 
 		case withCidReq := <-l.acceptWithCidReq:
 			reqKey := awaitingKey(withCidReq)
-			if conn, ok := incomingConns[reqKey]; ok {
-				withCidReq.connCh <- conn
+			if pending, ok := incomingConns[reqKey]; ok {
+				withCidReq.connCh <- pending.conn
 				delete(incomingConns, reqKey)
+				pending.timer.Stop()
 				continue
 			}
 			awaiting[reqKey] = withCidReq
@@ -240,12 +263,36 @@ forLoop:
 			delete(awaiting, reqKey)
 		case waitId := <-l.stopWaitingCh:
 			delete(awaiting, waitId)
+		case key := <-l.pendingTimeout:
+			pending, ok := incomingConns[key]
+			delete(incomingConns, key)
+			if ok {
+				pending.timer.Stop()
+				_ = pending.conn.Close()
+			}
+
 		case <-l.ctx.Done():
 			return
 		case <-l.closed:
 			return
 		}
 	}
+}
+
+func (l *Listener) connAcceptTimeout(pending *PendingAcceptConn) {
+	var (
+		timer *time.Timer
+		done  = make(chan struct{})
+	)
+	timer = time.AfterFunc(20*time.Second, func() {
+		<-done
+		select {
+		case l.pendingTimeout <- pending.key:
+		case <-l.ctx.Done():
+		}
+	})
+	pending.timer = timer
+	close(done)
 }
 
 var _ net.Listener = &Listener{}
