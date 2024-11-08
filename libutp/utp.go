@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/p2p/enode"
+
 	"go.uber.org/zap"
 )
 
@@ -1106,6 +1108,7 @@ func (dh *delayHist) getValue() uint32 {
 //
 // See the documentation on the various types of callback to learn more.
 type Socket struct {
+	NodeId     enode.ID
 	addr       *net.UDPAddr
 	addrString string
 
@@ -2835,8 +2838,25 @@ func (mx *SocketMultiplexer) removeFromTracking(conn *Socket) {
 
 // Create a µTP socket for communication with a peer at the given address.
 // Create a µTP socket for communication with a peer at the given address.
-func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr, cid *ConnId) (*Socket, error) {
-	conn := &Socket{logger: mx.logger, packetTimeCallback: mx.packetTimeCallback}
+func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr, cid *ConnId, id enode.ID) (*Socket, error) {
+	mx.mapLock.Lock()
+	defer mx.mapLock.Unlock()
+	conn, found := mx.socketMap[fmt.Sprintf("%s_%d_%d", addr.String(), cid.sendId, cid.recvId)]
+	if found {
+		// we can only have one Socket with a given same remote address
+		// associated with our underlying PacketConn (as we can only identify/
+		// distinguish connections by the 4-tuple of {local-ip, local-port,
+		// remote-ip, remote-port}).
+		err := &net.OpError{
+			Op:   "create",
+			Net:  "utp",
+			Addr: conn.addr,
+			Err:  syscall.EADDRINUSE,
+		}
+		return nil, err
+	}
+
+	conn = &Socket{logger: mx.logger, packetTimeCallback: mx.packetTimeCallback}
 
 	// default to version 1
 	conn.SetSockOpt(SO_UTPVERSION, 1)
@@ -2887,23 +2907,8 @@ func (mx *SocketMultiplexer) Create(sendToCB PacketSendCallback, sendToUserdata 
 
 	conn.outbuf.elements = make([]*outgoingPacket, 16)
 	conn.inbuf.elements = make([][]byte, 16)
+	conn.NodeId = id
 
-	mx.mapLock.Lock()
-	defer mx.mapLock.Unlock()
-	_, found := mx.socketMap[fmt.Sprintf("%s_%d_%d", conn.addrString, conn.ConnIDSend, conn.ConnIDRecv)]
-	if found {
-		// we can only have one Socket with a given same remote address
-		// associated with our underlying PacketConn (as we can only identify/
-		// distinguish connections by the 4-tuple of {local-ip, local-port,
-		// remote-ip, remote-port}).
-		err := &net.OpError{
-			Op:   "create",
-			Net:  "utp",
-			Addr: conn.addr,
-			Err:  syscall.EADDRINUSE,
-		}
-		return nil, err
-	}
 	mx.socketMap[fmt.Sprintf("%s_%d_%d", conn.addrString, conn.ConnIDSend, conn.ConnIDRecv)] = conn
 
 	return conn, nil
@@ -3081,7 +3086,7 @@ func (s *Socket) Connect() {
 //
 // If a new connection is being initiated, a new Socket object will be created
 // and passed to the provided GotIncomingConnection callback.
-func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sendToCB PacketSendCallback, sendToUserdata interface{}, buffer []byte, toAddr *net.UDPAddr) bool {
+func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sendToCB PacketSendCallback, sendToUserdata interface{}, buffer []byte, toAddr *net.UDPAddr, nodeId enode.ID) bool {
 	if len(buffer) < minInt(sizeofPacketFormat, sizeofPacketFormatV1) {
 		mx.logger.Debug("recv packet too small", zap.Int("len", len(buffer)))
 		return false
@@ -3190,7 +3195,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		mx.logger.Debug("Incoming connection", zap.Int8("utp-version", version), zap.Any("cid", cid), zap.String("addr", toAddr.String()))
 
 		// Create a new UTP socket to handle this new connection
-		conn, err := mx.Create(sendToCB, sendToUserdata, toAddr, cid)
+		conn, err := mx.Create(sendToCB, sendToUserdata, toAddr, cid, nodeId)
 		if err != nil && err.(*net.OpError).Err == syscall.EADDRINUSE {
 			mx.logger.Debug("synchronous connections? Got connection created", zap.Error(err))
 			conn = mx.socketMap[fmt.Sprintf("%s_%d_%d", toAddr.String(), id, id+1)]

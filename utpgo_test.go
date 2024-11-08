@@ -10,12 +10,14 @@ import (
 	"crypto/sha512"
 	"errors"
 	"fmt"
-	"github.com/optimism-java/utp-go"
 	"io"
 	"net"
 	"runtime/pprof"
 	"strconv"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/optimism-java/utp-go"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -35,9 +37,10 @@ func TestUTPConnsInSerial(t *testing.T) {
 	l := newTestServer(t, logger.Named("server"))
 
 	group := newLabeledErrgroup(context.Background())
+
 	group.Go(func(ctx context.Context) error {
 		for {
-			newConn, err := l.AcceptUTPContext(ctx, 0)
+			newConn, err := l.AcceptUTPContext(ctx, enode.ID{}, nil)
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) {
 					return nil
@@ -50,6 +53,7 @@ func TestUTPConnsInSerial(t *testing.T) {
 			}, "task", "handle", "remote", newConn.RemoteAddr().String())
 		}
 	}, "task", "accept")
+
 	group.Go(func(ctx context.Context) error {
 		for i := 0; i < repeats; i++ {
 			index := i
@@ -59,6 +63,7 @@ func TestUTPConnsInSerial(t *testing.T) {
 		}
 		return l.Close()
 	}, "task", "connect")
+
 	err := group.Wait()
 	require.NoError(t, err)
 }
@@ -72,7 +77,7 @@ func TestUTPConnsInParallel(t *testing.T) {
 		subgroup := newLabeledErrgroup(ctx)
 		for i := 0; i < repeats; i++ {
 			subgroup.Go(func(ctx context.Context) error {
-				newConn, err := l.AcceptUTPContext(ctx, 0)
+				newConn, err := l.AcceptUTPContext(ctx, enode.ID{}, nil)
 				if err != nil {
 					if errors.Is(err, net.ErrClosed) {
 						return nil

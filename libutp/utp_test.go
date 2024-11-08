@@ -1,6 +1,8 @@
 package libutp
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestConnIdGenerator(t *testing.T) {
 	genarator := NewConnIdGenerator()

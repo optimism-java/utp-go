@@ -9,8 +9,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/optimism-java/utp-go/buffers"
-	"github.com/optimism-java/utp-go/libutp"
 	"io"
 	"net"
 	"os"
@@ -18,6 +16,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/optimism-java/utp-go/buffers"
+	"github.com/optimism-java/utp-go/libutp"
 
 	"go.uber.org/zap"
 )
@@ -93,14 +95,11 @@ type Conn struct {
 	connectChan chan struct{}
 }
 
-// Listener represents a listening µTP socket.
-type Listener struct {
-	utpSocket
-
-	acceptChan      <-chan *Conn
-	lock            sync.Mutex
-	incommingConn   map[*Conn]uint32
-	requiringConnId map[uint32]bool
+type AcceptReq struct {
+	connCh    chan *Conn
+	cid       *libutp.ConnId
+	nodeId    enode.ID
+	waitingId string
 }
 
 func NewConnIdGenerator() libutp.ConnIdGenerator {
@@ -212,7 +211,7 @@ func dial(ctx context.Context, s *utpDialState, network string, localAddr, remot
 	if s.connId == 0 {
 		connId = libutp.RandomUint16()
 	}
-	utpConn.baseConn, err = manager.mx.Create(packetSendCallback, manager, (*net.UDPAddr)(remoteAddr), libutp.SendCid(connId))
+	utpConn.baseConn, err = manager.mx.Create(packetSendCallback, manager, (*net.UDPAddr)(remoteAddr), libutp.SendCid(connId), enode.ID{})
 	if err != nil {
 		return nil, err
 	}
@@ -256,77 +255,6 @@ func dial(ctx context.Context, s *utpDialState, network string, localAddr, remot
 		return nil, utpConn.makeOpError("dial", err)
 	}
 	return utpConn, nil
-}
-
-// Listen creates a listening µTP socket on the local network address. It is
-// analogous to net.Listen.
-func Listen(network string, addr string) (net.Listener, error) {
-	return ListenOptions(network, addr)
-}
-
-// ListenOptions creates a listening µTP socket on the local network address with
-// the given options.
-func ListenOptions(network, addr string, options ...ConnectOption) (net.Listener, error) {
-	s := utpDialState{
-		logger: noopLogger,
-	}
-	for _, opt := range options {
-		opt(&s)
-	}
-	switch network {
-	case "utp", "utp4", "utp6":
-	default:
-		return nil, fmt.Errorf("network %s not supported", network)
-	}
-	udpAddr, err := ResolveUTPAddr(network, addr)
-	if err != nil {
-		return nil, err
-	}
-	listener, err := listen(&s, network, udpAddr)
-	if err != nil {
-		return nil, err
-	}
-	if s.tlsConfig != nil {
-		return tls.NewListener(listener, s.tlsConfig), nil
-	}
-	return listener, nil
-}
-
-// ListenUTP creates a listening µTP socket on the local network address. It is
-// analogous to net.ListenUDP.
-func ListenUTP(network string, localAddr *Addr) (*Listener, error) {
-	return listen(&utpDialState{}, network, localAddr)
-}
-
-// ListenUTPOptions creates a listening µTP socket on the given local network
-// address and with the given options.
-func ListenUTPOptions(network string, localAddr *Addr, options ...ConnectOption) (*Listener, error) {
-	s := utpDialState{
-		logger: noopLogger,
-	}
-	for _, opt := range options {
-		opt(&s)
-	}
-	return listen(&s, network, localAddr)
-}
-
-func listen(s *utpDialState, network string, localAddr *Addr) (*Listener, error) {
-	manager, err := newSocketManager(s, network, (*net.UDPAddr)(localAddr), nil)
-	if err != nil {
-		return nil, err
-	}
-	udpLocalAddr := manager.LocalAddr().(*net.UDPAddr)
-	utpListener := &Listener{
-		utpSocket: utpSocket{
-			localAddr: udpLocalAddr,
-			manager:   manager,
-		},
-		acceptChan:      manager.acceptChan,
-		incommingConn:   make(map[*Conn]uint32),
-		requiringConnId: make(map[uint32]bool),
-	}
-	manager.start()
-	return utpListener, nil
 }
 
 type utpDialState struct {
@@ -680,115 +608,6 @@ func (c *Conn) makeOpError(op string, err error) error {
 
 var _ net.Conn = &Conn{}
 
-// AcceptUTPContext accepts a new µTP connection on a listening socket.
-func (l *Listener) AcceptUTPContext(ctx context.Context, connIdSeed uint32) (*Conn, error) {
-	l.recordRequireConnId(connIdSeed)
-	ticker := time.NewTicker(time.Millisecond * 17)
-	defer ticker.Stop()
-	for {
-		select {
-		case newConn, ok := <-l.acceptChan:
-			if ok {
-				if conn := l.filterConn(newConn, connIdSeed); conn != nil {
-					return conn, nil
-				}
-				continue
-			}
-			err := l.encounteredError
-			if err == nil {
-				err = l.makeOpError("accept", net.ErrClosed)
-			}
-			return nil, err
-		case <-ticker.C:
-			if conn := l.removeAndGetCommingConn(connIdSeed); conn != nil {
-				return conn, nil
-			}
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-}
-
-func (l *Listener) recordRequireConnId(connId uint32) {
-	if connId == 0 {
-		return
-	}
-	l.lock.Lock()
-	defer l.lock.Unlock()
-	l.requiringConnId[connId] = true
-}
-
-func (l *Listener) putInCommingConn(newConn *Conn) {
-	l.lock.Lock()
-	defer l.lock.Unlock()
-	l.incommingConn[newConn] = newConn.baseConn.ConnSeed
-}
-
-func (l *Listener) filterConn(newConn *Conn, connIdSeed uint32) *Conn {
-	l.lock.Lock()
-	defer l.lock.Unlock()
-	connSeed := newConn.baseConn.ConnSeed
-	if connSeed == connIdSeed || (connIdSeed == 0 && !l.requiringConnId[connSeed]) {
-		return newConn
-	}
-	if _, exist := l.incommingConn[newConn]; !exist {
-		l.incommingConn[newConn] = newConn.baseConn.ConnSeed
-	}
-	return nil
-}
-
-func (l *Listener) removeAndGetCommingConn(connId uint32) *Conn {
-	l.lock.Lock()
-	defer l.lock.Unlock()
-	if len(l.incommingConn) == 0 {
-		return nil
-	}
-	var result *Conn
-	for conn, connIdSeed := range l.incommingConn {
-		if connId == connIdSeed || (connId == 0 && !l.requiringConnId[connIdSeed]) {
-			result = conn
-			break
-		}
-	}
-	if result != nil {
-		delete(l.incommingConn, result)
-		delete(l.requiringConnId, result.baseConn.ConnSeed)
-	}
-	return result
-}
-
-// AcceptUTPWithConnId accepts a new µTP connection with special connection id on a listening socket.
-func (l *Listener) AcceptUTPWithConnId(connId uint32) (*Conn, error) {
-	return l.AcceptUTPContext(context.Background(), connId)
-}
-
-// AcceptUTP accepts a new µTP connection on a listening socket.
-func (l *Listener) AcceptUTP() (*Conn, error) {
-	return l.AcceptUTPContext(context.Background(), 0)
-}
-
-// Accept accepts a new µTP connection on a listening socket.
-func (l *Listener) Accept() (net.Conn, error) {
-	return l.AcceptUTP()
-}
-
-// AcceptContext accepts a new µTP connection on a listening socket.
-func (l *Listener) AcceptContext(ctx context.Context) (net.Conn, error) {
-	return l.AcceptUTPContext(ctx, 0)
-}
-
-// Close closes a Listener.
-func (l *Listener) Close() error {
-	return l.utpSocket.Close()
-}
-
-// Addr returns the local address of a Listener.
-func (l *Listener) Addr() net.Addr {
-	return l.utpSocket.LocalAddr()
-}
-
-var _ net.Listener = &Listener{}
-
 func (u *utpSocket) makeOpError(op string, err error) error {
 	return &net.OpError{
 		Op:     op,
@@ -840,9 +659,14 @@ type PacketRouter struct {
 	packetCache chan *packet
 }
 
+type NodeInfo struct {
+	Id   enode.ID
+	Addr *net.UDPAddr
+}
+
 type packet struct {
 	buf  []byte
-	addr *net.UDPAddr
+	node *NodeInfo
 }
 
 func NewPacketRouter(mw MessageWriter) *PacketRouter {
@@ -856,12 +680,12 @@ func (pr *PacketRouter) WriteMsg(buf []byte, addr *net.UDPAddr) (int, error) {
 	return pr.mw(buf, addr)
 }
 
-func (pr *PacketRouter) ReceiveMessage(buf []byte, addr *net.UDPAddr) {
+func (pr *PacketRouter) ReceiveMessage(buf []byte, node *NodeInfo) {
 	pr.once.Do(func() {
 		go func() {
 			for {
 				if packPt, ok := <-pr.packetCache; ok {
-					pr.sm.processIncomingPacket(packPt.buf, packPt.addr)
+					pr.sm.processIncomingPacketWithNode(packPt.buf, node)
 				} else {
 					pr.sm.logger.Info("Packet router has been stopped")
 					return
@@ -869,7 +693,7 @@ func (pr *PacketRouter) ReceiveMessage(buf []byte, addr *net.UDPAddr) {
 			}
 		}()
 	})
-	pr.packetCache <- &packet{buf: buf, addr: addr}
+	pr.packetCache <- &packet{buf: buf, node: node}
 }
 
 type SocketManager struct {
@@ -1053,7 +877,13 @@ func (sm *SocketManager) socketManagement(ctx context.Context) {
 func (sm *SocketManager) processIncomingPacket(data []byte, destAddr *net.UDPAddr) {
 	sm.baseConnLock.Lock()
 	defer sm.baseConnLock.Unlock()
-	sm.mx.IsIncomingUTP(gotIncomingConnectionCallback, packetSendCallback, sm, data, destAddr)
+	sm.mx.IsIncomingUTP(gotIncomingConnectionCallback, packetSendCallback, sm, data, destAddr, enode.ID{})
+}
+
+func (sm *SocketManager) processIncomingPacketWithNode(data []byte, node *NodeInfo) {
+	sm.baseConnLock.Lock()
+	defer sm.baseConnLock.Unlock()
+
 }
 
 func (sm *SocketManager) checkTimeouts() {

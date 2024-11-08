@@ -5,15 +5,18 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"github.com/optimism-java/utp-go"
-	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"go.uber.org/zap/zaptest"
 	"io"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/optimism-java/utp-go"
+	"github.com/optimism-java/utp-go/libutp"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest"
 )
 
 func TestAcceptUtpWithConnId(t *testing.T) {
@@ -22,7 +25,7 @@ func TestAcceptUtpWithConnId(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		conn, err := l.AcceptUTPWithConnId(12)
+		conn, err := l.AcceptUTPWithConnId(enode.ID{}, libutp.ReceConnId(12))
 		if err != nil {
 			panic(err)
 		}
@@ -99,7 +102,7 @@ func TestAcceptTimeout(t *testing.T) {
 	l := newTestServer(t, logger.Named("server"))
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(1)*time.Second)
-		_, err := l.AcceptUTPContext(ctx, 13)
+		_, err := l.AcceptUTPContext(ctx, enode.ID{}, libutp.SendCid(13))
 		assert.Equal(t, true, err != nil, "except timeout but not")
 		cancel()
 	}()
@@ -113,7 +116,7 @@ func TestListenerClosed(t *testing.T) {
 		now := time.Now()
 		timeout := time.Duration(10) * time.Second
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		_, _ = l.AcceptUTPContext(ctx, 13)
+		_, _ = l.AcceptUTPContext(ctx, enode.ID{}, libutp.ReceConnId(13))
 		timeComsumed := time.Since(now).Seconds()
 		assert.Equal(t, true, timeComsumed < timeout.Seconds(), "except stoped immediately but not")
 		cancel()
@@ -122,7 +125,7 @@ func TestListenerClosed(t *testing.T) {
 	now := time.Now()
 	timeout := time.Duration(10) * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	_, _ = l.AcceptUTPContext(ctx, 13)
+	_, _ = l.AcceptUTPContext(ctx, enode.ID{}, libutp.ReceConnId(13))
 	timeComsumed := time.Since(now).Seconds()
 	assert.Equal(t, true, timeComsumed < timeout.Seconds(), "except stoped immediately but not")
 	cancel()

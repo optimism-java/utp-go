@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/p2p/enode"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
@@ -204,7 +206,7 @@ func newTestScenario(t testing.TB) *testScenario {
 		receiver: &scenario.sendManager,
 	}
 
-	sock, err := scenario.mx.Create(testSendToProc, &scenario.sendManager, &scenario.recvManager.myAddr, SendCid(RandomUint32()))
+	sock, err := scenario.mx.Create(testSendToProc, &scenario.sendManager, &scenario.recvManager.myAddr, SendCid(RandomUint32()), enode.ID{})
 	require.NoError(t, err)
 	scenario.senderSocket = newTestUTPSocket(t, sock)
 	return scenario
@@ -295,7 +297,7 @@ func (um *udpManager) flush(t testing.TB, ts *testScenario) {
 		if um.receiver != nil {
 			um.mx.IsIncomingUTP(func(_ interface{}, conn *Socket) {
 				ts.incomingCallback(t, conn)
-			}, testSendToProc, um.receiver, uo.mem, &um.myAddr)
+			}, testSendToProc, um.receiver, uo.mem, &um.myAddr, enode.ID{})
 		}
 		um.sendBuffer = um.sendBuffer[1:]
 	}
