@@ -1348,9 +1348,9 @@ func registerSentPacket(length int) {
 	}
 }
 
-func sendToAddr(sendToProc PacketSendCallback, sendToUserdata interface{}, p []byte, addr *net.UDPAddr) {
+func sendToAddr(sendToProc PacketSendCallback, sendToUserdata interface{}, p []byte, id enode.ID, addr *net.UDPAddr) {
 	registerSentPacket(len(p))
-	sendToProc(sendToUserdata, p, addr)
+	sendToProc(sendToUserdata, p, id, addr)
 }
 
 // we'll expect "data" to contain all the data for the packet's payload,
@@ -1395,7 +1395,7 @@ func (s *Socket) sendData(b packetHeader, data []byte, bwType BandwidthType, cur
 
 	s.logger.Debug("send-data", zap.Int("len", len(data)), zap.Uint32("id", s.ConnIDSend), zap.Uint64("timestamp", packetTime), zap.Uint32("reply_micro", s.replyMicro), zap.Stringer("flags", flags), zap.Uint16("seq_nr", seqNum), zap.Uint16("ack_nr", ackNum))
 
-	sendToAddr(s.sendToCB, s.sendToUserdata, data, s.addr)
+	sendToAddr(s.sendToCB, s.sendToUserdata, data, s.NodeId, s.addr)
 }
 
 func (s *Socket) sendAck(synack bool, currentMS uint32) {
@@ -1471,7 +1471,7 @@ func (s *Socket) sendKeepAlive(currentMS uint32) {
 	//s.ackNum++
 }
 
-func sendRST(logger *zap.Logger, sendToProc PacketSendCallback, sendToUserdata interface{}, addr *net.UDPAddr, connIDSend uint32, ackNum uint16, seqNum uint16, version int8) {
+func sendRST(logger *zap.Logger, sendToProc PacketSendCallback, sendToUserdata interface{}, nodeId enode.ID, addr *net.UDPAddr, connIDSend uint32, ackNum uint16, seqNum uint16, version int8) {
 	var p packetHeader
 	if version == 0 {
 		p = &packetFormat{}
@@ -1494,7 +1494,7 @@ func sendRST(logger *zap.Logger, sendToProc PacketSendCallback, sendToUserdata i
 
 	logger.Debug("sending RST", zap.Uint32("id", connIDSend), zap.Uint16("seq_nr", seqNum), zap.Uint16("ack_nr", ackNum))
 	logger.Debug("send", zap.Int("len", len(packetData)), zap.Uint32("id", connIDSend))
-	sendToAddr(sendToProc, sendToUserdata, packetData, addr)
+	sendToAddr(sendToProc, sendToUserdata, packetData, nodeId, addr)
 }
 
 func (s *Socket) sendPacket(pkt *outgoingPacket, currentMS uint32) {
@@ -3186,7 +3186,7 @@ func (mx *SocketMultiplexer) IsIncomingUTP(incomingCB GotIncomingConnection, sen
 		r.ackNum = seqNum
 		r.timestamp = mx.getCurrentMS()
 
-		sendRST(mx.logger, sendToCB, sendToUserdata, toAddr, id, seqNum, uint16(RandomUint32()), version)
+		sendRST(mx.logger, sendToCB, sendToUserdata, nodeId, toAddr, id, seqNum, uint16(RandomUint32()), version)
 		return true
 	}
 

@@ -316,7 +316,7 @@ func (ts *testScenario) incomingCallback(t testing.TB, conn *Socket) {
 	ts.incomingSocket.writable = true
 }
 
-func testSendToProc(userdata interface{}, buf []byte, addr *net.UDPAddr) {
+func testSendToProc(userdata interface{}, buf []byte, id enode.ID, addr *net.UDPAddr) {
 	um := userdata.(*udpManager)
 	um.send(buf, addr)
 }

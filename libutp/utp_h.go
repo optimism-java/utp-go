@@ -6,7 +6,11 @@
 
 package libutp
 
-import "net"
+import (
+	"net"
+
+	"github.com/ethereum/go-ethereum/p2p/enode"
+)
 
 // SO_UTPVERSION is the option name used to set the version of µTP
 // to use in outgoing connections. This can only be called before
@@ -160,7 +164,7 @@ type GotIncomingConnection func(userdata interface{}, s *Socket)
 // The callback is allowed to buffer the outgoing data instead of transmitting
 // it immediately, if desired, but the data should be transmitted as soon as
 // feasible.
-type PacketSendCallback func(userdata interface{}, p []byte, addr *net.UDPAddr)
+type PacketSendCallback func(userdata interface{}, p []byte, id enode.ID, addr *net.UDPAddr)
 
 // Stats collects statistics for a particular Socket when utp-go is built with
 // the 'utpstats' build tag. The (*Socket).GetStats() method will be made
