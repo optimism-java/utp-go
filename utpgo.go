@@ -649,7 +649,7 @@ func (u *utpSocket) LocalAddr() net.Addr {
 	return (*Addr)(u.localAddr)
 }
 
-type MessageWriter func(buf []byte, addr *net.UDPAddr) (int, error)
+type MessageWriter func(buf []byte, id enode.ID, addr *net.UDPAddr) (int, error)
 
 type PacketRouter struct {
 	udpSocket   *net.UDPConn
@@ -676,8 +676,8 @@ func NewPacketRouter(mw MessageWriter) *PacketRouter {
 	}
 }
 
-func (pr *PacketRouter) WriteMsg(buf []byte, addr *net.UDPAddr) (int, error) {
-	return pr.mw(buf, addr)
+func (pr *PacketRouter) WriteMsg(buf []byte, id enode.ID, addr *net.UDPAddr) (int, error) {
+	return pr.mw(buf, id, addr)
 }
 
 func (pr *PacketRouter) ReceiveMessage(buf []byte, node *NodeInfo) {
@@ -782,7 +782,7 @@ func newSocketManager(s *utpDialState, network string, localAddr, remoteAddr *ne
 		}
 		s.pr = &PacketRouter{
 			udpSocket: udpSocket,
-			mw: func(buf []byte, addr *net.UDPAddr) (int, error) {
+			mw: func(buf []byte, id enode.ID, addr *net.UDPAddr) (int, error) {
 				return udpSocket.WriteToUDP(buf, addr)
 			},
 		}
@@ -883,7 +883,7 @@ func (sm *SocketManager) processIncomingPacket(data []byte, destAddr *net.UDPAdd
 func (sm *SocketManager) processIncomingPacketWithNode(data []byte, node *NodeInfo) {
 	sm.baseConnLock.Lock()
 	defer sm.baseConnLock.Unlock()
-
+	sm.mx.IsIncomingUTP(gotIncomingConnectionCallback, packetSendCallback, sm, data, node.Addr, node.Id)
 }
 
 func (sm *SocketManager) checkTimeouts() {
@@ -1019,10 +1019,10 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 	}
 }
 
-func packetSendCallback(userdata interface{}, buf []byte, addr *net.UDPAddr) {
+func packetSendCallback(userdata interface{}, buf []byte, id enode.ID, addr *net.UDPAddr) {
 	sm := userdata.(*SocketManager)
 	sm.logger.Debug("udp sending bytes", zap.Int("len", len(buf)))
-	_, err := sm.pr.WriteMsg(buf, addr)
+	_, err := sm.pr.WriteMsg(buf, id, addr)
 	if err != nil {
 		sm.registerSocketError(err)
 	}
