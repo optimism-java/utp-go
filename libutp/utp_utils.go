@@ -7,10 +7,9 @@
 package libutp
 
 import (
-	"crypto/rand"
-	"encoding/binary"
-	"io"
 	"net"
+
+	"github.com/valyala/fastrand"
 )
 
 const (
@@ -34,6 +33,8 @@ const (
 	UdpTeredoMTU = teredoMTU - ipv6HeaderSize - udpHeaderSize
 )
 
+var randGenerator = fastrand.RNG{}
+
 // GetUDPMTU returns a best guess as to the MTU (maximum transmission unit) on
 // the network to which the specified address belongs (IPv4 or IPv6).
 func GetUDPMTU(addr *net.UDPAddr) uint16 {
@@ -55,21 +56,11 @@ func getUDPOverhead(addr *net.UDPAddr) uint16 {
 }
 
 func RandomUint32() uint32 {
-	var buf [4]byte
-	_, err := io.ReadFull(rand.Reader, buf[:])
-	if err != nil {
-		panic("can't read from random source: " + err.Error())
-	}
-	return binary.LittleEndian.Uint32(buf[:])
+	return randGenerator.Uint32()
 }
 
 func RandomUint16() uint32 {
-	var buf [2]byte
-	_, err := io.ReadFull(rand.Reader, buf[:])
-	if err != nil {
-		panic("can't read from random source: " + err.Error())
-	}
-	return uint32(binary.LittleEndian.Uint16(buf[:]))
+	return randGenerator.Uint32n(65536)
 }
 
 func getMaxPacketSize() int { return 980 }
