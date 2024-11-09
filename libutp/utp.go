@@ -161,12 +161,15 @@ func (g *DefaultConnIdGenerator) GenCid(p any, isInitiator bool) *ConnId {
 	for {
 		recv := RandomUint16()
 		var send uint32
+		var seed uint32
 		if isInitiator {
 			send = recv + 1
+			seed = recv
 		} else {
 			send = recv - 1
+			seed = send
 		}
-		newConnId := ConnId{recvId: recv, sendId: send, peer: p}
+		newConnId := ConnId{connSeed: seed, recvId: recv, sendId: send, peer: p}
 		if _, ok := g.Cids[newConnId]; !ok {
 			g.Cids[newConnId] = true
 			connId = &newConnId

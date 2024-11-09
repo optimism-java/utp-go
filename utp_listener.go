@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/p2p/enode"
@@ -18,6 +19,7 @@ type AcceptReq struct {
 	cid       *libutp.ConnId
 	nodeId    enode.ID
 	waitingId string
+	closed    atomic.Bool
 }
 
 type PendingAcceptConn struct {
@@ -127,17 +129,6 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, id enode.ID, connId *li
 		nodeId:    id,
 		waitingId: strconv.Itoa(int(libutp.RandomUint32())),
 	}
-	defer func(acceptReq *AcceptReq) {
-		close(req.connCh)
-		if err == nil {
-			return
-		}
-		if connId != nil {
-			l.stopWaitingWithCidCh <- req
-		} else {
-			l.stopWaitingCh <- req.waitingId
-		}
-	}(req)
 	if connId == nil {
 		l.acceptReq <- req
 	} else {
@@ -148,6 +139,11 @@ func (l *Listener) AcceptUTPContext(ctx context.Context, id enode.ID, connId *li
 		case c = <-req.connCh:
 			return
 		case <-ctx.Done():
+			if connId != nil {
+				l.stopWaitingWithCidCh <- req
+			} else {
+				l.stopWaitingCh <- req.waitingId
+			}
 			err = fmt.Errorf("accept timeout: id = %s, connId = %d", id.String(), connId.SendId())
 			return
 		case <-l.closed:
@@ -216,7 +212,7 @@ forLoop:
 				return
 			}
 			key := incomingKey(c)
-			if req, ok := awaitingWithCid[key]; ok {
+			if req, exist := awaitingWithCid[key]; exist {
 				req.connCh <- c
 				delete(awaitingWithCid, key)
 				continue
