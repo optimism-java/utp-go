@@ -257,7 +257,7 @@ forLoop:
 				pending.timer.Stop()
 				continue
 			}
-			awaiting[reqKey] = withCidReq
+			awaitingWithCid[reqKey] = withCidReq
 		case stopWait := <-l.stopWaitingWithCidCh:
 			reqKey := awaitingKey(stopWait)
 			delete(awaiting, reqKey)
