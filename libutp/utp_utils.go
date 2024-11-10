@@ -59,8 +59,8 @@ func RandomUint32() uint32 {
 	return randGenerator.Uint32()
 }
 
-func RandomUint16() uint32 {
-	return randGenerator.Uint32n(65536)
+func RandomUint16() uint16 {
+	return uint16(randGenerator.Uint32n(65535))
 }
 
 func getMaxPacketSize() int { return 980 }

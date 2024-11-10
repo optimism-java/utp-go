@@ -182,7 +182,12 @@ func dial(ctx context.Context, s *utpDialState, network string, localAddr, remot
 	localUDPAddr := manager.LocalAddr().(*net.UDPAddr)
 	// different from managerLogger in case local addr interface and/or port
 	// has been clarified
-	connLogger := s.logger.With(zap.Stringer("local-addr", localUDPAddr), zap.Stringer("remote-addr", remoteAddr), zap.String("dir", "out"))
+	var connLogger *zap.Logger
+	if s.logger == nil {
+		connLogger = s.logger.With(zap.Stringer("local-addr", localUDPAddr), zap.Stringer("remote-addr", remoteAddr), zap.String("dir", "out"))
+	} else {
+		connLogger = manager.logger.With(zap.Stringer("local-addr", localUDPAddr), zap.Stringer("remote-addr", remoteAddr), zap.String("dir", "out"))
+	}
 
 	utpConn := &Conn{
 		utpSocket: utpSocket{
@@ -255,7 +260,7 @@ type utpDialState struct {
 	ctx             context.Context
 	tlsConfig       *tls.Config
 	blockQueueCount int
-	connId          uint32
+	connId          uint16
 	sm              *SocketManager
 	maxPacketSize   int
 	pr              *PacketRouter
@@ -302,7 +307,7 @@ func WithTLS(tlsConfig *tls.Config) ConnectOption {
 }
 
 // WithConnId Connect or Accept with certain connection id.If not specified, a random connection id will be generated.
-func WithConnId(connId uint32) ConnectOption {
+func WithConnId(connId uint16) ConnectOption {
 	return func(s *utpDialState) {
 		s.connId = connId
 	}
@@ -673,12 +678,12 @@ func (pr *PacketRouter) WriteMsg(buf []byte, id enode.ID, addr *net.UDPAddr) (in
 	return pr.mw(buf, id, addr)
 }
 
-func (pr *PacketRouter) ReceiveMessage(buf []byte, node *NodeInfo) {
+func (pr *PacketRouter) ReceiveMessage(buf []byte, nodeInfo *NodeInfo) {
 	pr.once.Do(func() {
 		go func() {
 			for {
 				if packPt, ok := <-pr.packetCache; ok {
-					pr.sm.processIncomingPacketWithNode(packPt.buf, node)
+					pr.sm.processIncomingPacketWithNode(packPt.buf, packPt.node)
 				} else {
 					pr.sm.logger.Info("Packet router has been stopped")
 					return
@@ -686,7 +691,7 @@ func (pr *PacketRouter) ReceiveMessage(buf []byte, node *NodeInfo) {
 			}
 		}()
 	})
-	pr.packetCache <- &packet{buf: buf, node: node}
+	pr.packetCache <- &packet{buf: buf, node: nodeInfo}
 }
 
 type SocketManager struct {
@@ -993,7 +998,7 @@ func gotIncomingConnectionCallback(userdata interface{}, newBaseConn *libutp.Soc
 		OnState:   onStateCallback,
 		OnError:   onErrorCallback,
 	}, newUTPConn)
-	sm.logger.Info("accepted new connection", zap.Stringer("remote-addr", newUTPConn.RemoteAddr()), zap.Uint32("sendId", newUTPConn.baseConn.ConnIDSend), zap.Uint32("recvId", newUTPConn.baseConn.ConnIDRecv))
+	sm.logger.Info("accepted new connection", zap.Stringer("remote-addr", newUTPConn.RemoteAddr()), zap.Uint16("sendId", newUTPConn.baseConn.ConnIDSend), zap.Uint16("recvId", newUTPConn.baseConn.ConnIDRecv))
 	newUTPConn.baseConn.SetSockOpt(syscall.SO_RCVBUF, sm.readBufferSize)
 	select {
 	case sm.acceptChan <- newUTPConn:
