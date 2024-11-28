@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 
 	"go.uber.org/zap"
@@ -101,7 +103,23 @@ type ConnId struct {
 	// send connection id
 	sendId uint16
 	// peer info
-	peer any
+	peer enode.ID
+	// hashcode ConnId hashcode
+	hashcode common.Hash
+}
+
+func (c *ConnId) Hashcode() common.Hash {
+	if c.hashcode != (common.Hash{}) {
+		return c.hashcode
+	}
+	buf := make([]byte, 6+len(c.peer))
+	binary.BigEndian.PutUint16(buf[0:2], c.connSeed)
+	binary.BigEndian.PutUint16(buf[2:4], c.recvId)
+	binary.BigEndian.PutUint16(buf[4:6], c.sendId)
+	copy(buf[6:], c.peer[:])
+	hash := crypto.Keccak256Hash(buf)
+	c.hashcode = hash
+	return hash
 }
 
 func SendCid(connSeed uint16) *ConnId {
@@ -136,7 +154,7 @@ func (c *ConnId) SendId() uint16 {
 // ConnIdGenerator generates connection id
 type ConnIdGenerator interface {
 	// GenCid generates a random connection id
-	GenCid(peer any, isInitiator bool) *ConnId
+	GenCid(peer enode.ID, isInitiator bool) *ConnId
 	// Remove ConnId record
 	Remove(c *ConnId)
 }
@@ -154,7 +172,7 @@ func NewConnIdGenerator() ConnIdGenerator {
 	}
 }
 
-func (g *DefaultConnIdGenerator) GenCid(p any, isInitiator bool) *ConnId {
+func (g *DefaultConnIdGenerator) GenCid(p enode.ID, isInitiator bool) *ConnId {
 	g.lock.Lock()
 	defer g.lock.Unlock()
 	var connId *ConnId
@@ -170,7 +188,7 @@ func (g *DefaultConnIdGenerator) GenCid(p any, isInitiator bool) *ConnId {
 			seed = send
 		}
 		newConnId := ConnId{connSeed: seed, recvId: recv, sendId: send, peer: p}
-		if _, ok := g.Cids[newConnId]; !ok {
+		if _, ok := g.Cids[newConnId.Hashcode()]; !ok {
 			g.Cids[newConnId] = true
 			connId = &newConnId
 			break
@@ -183,8 +201,9 @@ func (g *DefaultConnIdGenerator) GenCid(p any, isInitiator bool) *ConnId {
 func (g *DefaultConnIdGenerator) Remove(c *ConnId) {
 	g.lock.Lock()
 	defer g.lock.Unlock()
-	if _, ok := g.Cids[*c]; ok {
-		delete(g.Cids, *c)
+	hash := c.Hashcode()
+	if _, ok := g.Cids[c.Hashcode()]; ok {
+		delete(g.Cids, hash)
 	}
 }
 
