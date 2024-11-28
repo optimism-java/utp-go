@@ -1753,7 +1753,7 @@ func (s *Socket) updateSendQuota(currentMS uint32) {
 		add = maxWindow
 	}
 	s.sendQuota += add
-	s.logger.Debug("(*Socket).updateSendQuota", zap.Int32("dt", dt), zap.Uint32("rtt", delayBase), zap.Int32("max_window", maxWindow), zap.Int32("quota", s.sendQuota/100))
+	s.logger.Debug("(*Socket).updateSendQuota", zap.Uint32("currentMS", currentMS), zap.Uint16("sendId", s.ConnIDSend), zap.Uint16("recvId", s.ConnIDRecv), zap.Int32("dt", dt), zap.Uint32("rtt", delayBase), zap.Int32("max_window", maxWindow), zap.Int32("quota", s.sendQuota/100))
 }
 
 func (s *Socket) checkTimeouts(currentMS uint32) {
@@ -3408,7 +3408,6 @@ func (s *Socket) RBDrained() {
 // work well.
 func (mx *SocketMultiplexer) CheckTimeouts() {
 	currentMS := mx.getCurrentMS()
-
 	for i := 0; i < len(mx.rstInfo); i++ {
 		if int(currentMS)-int(mx.rstInfo[i].timestamp) >= rstInfoTimeout {
 			mx.rstInfo, _ = removeRstInfo(mx.rstInfo, i)
@@ -3418,7 +3417,7 @@ func (mx *SocketMultiplexer) CheckTimeouts() {
 
 	socketList := mx.getSocketList()
 	for _, conn := range socketList {
-		conn.checkTimeouts(currentMS)
+		conn.checkTimeouts(mx.getCurrentMS())
 
 		// (storj): this was added by thepaul without a terribly good
 		// understanding of all the interconnected workings here. this _seems_
