@@ -471,7 +471,7 @@ func (c *Conn) Write(buf []byte) (n int, err error) {
 
 // WriteContext writes to a Conn.
 func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) {
-	const chunkSize = 16384 // 16KB chunks
+	const chunkSize = 64 * 1024 // 64KB chunks
 	totalWritten := 0
 
 	for i := 0; i < len(buf); i += chunkSize {
