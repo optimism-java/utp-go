@@ -27,8 +27,8 @@ import (
 // Buffer for data before it gets to µTP (there is another "send buffer" in
 // the libutp code, but it is for managing flow control window sizes).
 const (
-	readBufferSize  = 1048576
-	writeBufferSize = 1048576
+	readBufferSize  = 4194304
+	writeBufferSize = 4194304
 	// Make the read buffer larger than advertised, so that surplus bytes can be
 	// handled under certain conditions.
 	receiveBufferMultiplier = 2
@@ -471,6 +471,31 @@ func (c *Conn) Write(buf []byte) (n int, err error) {
 
 // WriteContext writes to a Conn.
 func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) {
+	const chunkSize = 16384 // 16KB chunks
+	totalWritten := 0
+
+	for i := 0; i < len(buf); i += chunkSize {
+		end := i + chunkSize
+		if end > len(buf) {
+			end = len(buf)
+		}
+
+		chunk := buf[i:end]
+		written, err := c.writeChunk(ctx, chunk)
+		totalWritten += written
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = c.makeOpError("write", syscall.ECONNRESET)
+			} else if errors.Is(err, net.ErrClosed) {
+				err = c.makeOpError("write", net.ErrClosed)
+			}
+			return totalWritten, err
+		}
+	}
+	return totalWritten, nil
+}
+
+func (c *Conn) writeChunk(ctx context.Context, chunk []byte) (n int, err error) {
 	c.stateLock.Lock()
 	if c.writePending {
 		c.stateLock.Unlock()
@@ -479,18 +504,6 @@ func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) 
 	c.writePending = true
 	deadline := c.writeDeadline
 	c.stateLock.Unlock()
-
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			// remote side closed connection cleanly, and µTP in/out streams
-			// are not independently closeable. Doesn't make sense to return
-			// an EOF from a Write method, so..
-			err = c.makeOpError("write", syscall.ECONNRESET)
-		} else if errors.Is(err, net.ErrClosed) {
-			err = c.makeOpError("write", net.ErrClosed)
-		}
-		return 0, err
-	}
 
 	defer func() {
 		c.stateLock.Lock()
@@ -503,12 +516,14 @@ func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) 
 		ctx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
 	}
+
 	for {
 		c.stateLock.Lock()
 		willClose := c.willClose
 		remoteIsDone := c.remoteIsDone
 		encounteredError := c.encounteredError
 		c.stateLock.Unlock()
+
 		if willClose {
 			return 0, c.makeOpError("write", net.ErrClosed)
 		}
@@ -516,16 +531,7 @@ func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) 
 			return 0, c.makeOpError("write", encounteredError)
 		}
 
-		if ok := c.writeBuffer.TryAppend(buf); ok {
-			// make sure µTP knows about the new bytes. this might be a bit
-			// confusing, but it doesn't matter if other writes occur between
-			// the TryAppend() above and the acquisition of the baseConnLock
-			// below. All that matters is that (a) there is at least one call
-			// to baseConn.Write scheduled to be made after this point (without
-			// undue blocking); (b) baseConnLock is held when that Write call
-			// is made; and (c) the amount of data in the write buffer does not
-			// decrease between the SpaceUsed() call and the start of the next
-			// call to onWriteCallback.
+		if ok := c.writeBuffer.TryAppend(chunk); ok {
 			func() {
 				c.manager.baseConnLock.Lock()
 				defer c.manager.baseConnLock.Unlock()
@@ -535,10 +541,10 @@ func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) 
 				c.baseConn.Write(amount)
 			}()
 
-			return len(buf), nil
+			return len(chunk), nil
 		}
 
-		waitChan, cancelWait, err := c.writeBuffer.WaitForSpaceChan(len(buf))
+		waitChan, cancelWait, err := c.writeBuffer.WaitForSpaceChan(len(chunk))
 		if err != nil {
 			if errors.Is(err, buffers.ErrIsClosed) {
 				err = c.makeOpError("write", c.encounteredError)
@@ -546,15 +552,11 @@ func (c *Conn) WriteContext(ctx context.Context, buf []byte) (n int, err error) 
 			return 0, err
 		}
 
-		// couldn't write the data yet; wait until we can, or until we hit the
-		// timeout, or until the conn is closed.
 		select {
 		case <-ctx.Done():
 			cancelWait()
 			err = ctx.Err()
 			if errors.Is(err, context.DeadlineExceeded) {
-				// transform deadline error to os.ErrDeadlineExceeded as per
-				// net.Conn specification
 				err = c.makeOpError("write", os.ErrDeadlineExceeded)
 			}
 			return 0, err
