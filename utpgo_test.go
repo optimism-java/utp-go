@@ -142,7 +142,7 @@ func readContextFull(ctx context.Context, r contextReader, buf []byte) (n int, e
 	return len(buf), nil
 }
 
-const dataBlobSize = 4096
+const dataBlobSize = 10000000
 
 func handleConn(ctx context.Context, conn *utp.Conn) (err error) {
 	defer func() {
@@ -204,15 +204,26 @@ func makeConn(ctx context.Context, logger *zap.Logger, addr net.Addr) (err error
 	hashOfData := sha512.Sum512(data[:dataBlobSize])
 	copy(data[dataBlobSize:], hashOfData[:])
 	logger.Info("writing bytes", zap.Any("len", len(data)))
-	n, err := conn.WriteContext(ctx, data)
-	if err != nil {
-		return err
+
+	// Split large transfers into chunks
+	chunkSize := 16384 // 16KB chunks
+	for i := 0; i < len(data); i += chunkSize {
+		end := i + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+
+		n, err := conn.WriteContext(ctx, data[i:end])
+		if err != nil {
+			return err
+		}
+		if n < len(data[i:end]) {
+			return fmt.Errorf("short write: %d < %d", n, len(data[i:end]))
+		}
 	}
-	if n < len(data) {
-		return fmt.Errorf("short write: %d < %d", n, len(data))
-	}
+
 	returnData := make([]byte, 68)
-	n, err = conn.ReadContext(ctx, returnData)
+	n, err := conn.ReadContext(ctx, returnData)
 	if err != nil && err != io.EOF {
 		return err
 	}
